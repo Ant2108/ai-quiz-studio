@@ -18,7 +18,25 @@ port = 54323
 [auth]
 enabled = true
 site_url = "http://localhost:5173"
-additional_redirect_urls = ["https://localhost:5173"]
+additional_redirect_urls = ["https://localhost:5173", "https://ant2108.github.io/ai-quiz-studio"]
 
 [functions.process-document]
+verify_jwt = true
+
+[functions.generate-quiz]
+verify_jwt = true
+
+[functions.start-attempt]
+verify_jwt = true
+
+[functions.answer-question]
+verify_jwt = true
+
+[functions.submit-attempt]
+verify_jwt = true
+
+[functions.get-attempt-review]
+verify_jwt = true
+
+[functions.moderate-quiz]
 verify_jwt = true

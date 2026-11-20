@@ -1,13 +1,9 @@
-# Database Schema
+# Database Schema Overview — AI Quiz Studio
 
-Database migrations are managed under `supabase/migrations/`.
+Tài liệu thiết kế đầy đủ 11 bảng, sơ đồ ERD, ràng buộc toàn vẹn, triggers và stored procedures nằm tại [docs/DATABASE_DESIGN.md](DATABASE_DESIGN.md).
 
-## Planned Core Tables
-- `profiles`: User profile metadata linked to `auth.users`.
-- `documents`: Uploaded source files and extraction/processing status.
-- `questions`: Question bank items (prompt, options, correct answer, explanation, source document).
-- `exams`: Quiz/exam configurations (title, duration, question set).
-- `exam_attempts` / `results`: User submissions, answers, scores, and timestamps.
+## Thứ tự SQL Migrations (`supabase/migrations/`)
 
-## Row Level Security (RLS)
-All user-owned tables should enforce RLS policies scoped to `auth.uid()`.
+1. `20261120000001_schema_upgrade.sql` — Nâng cấp 4 bảng cũ (`documents`, `questions`, `question_options`, `question_answers`) bằng `ALTER TABLE` + tạo 7 bảng mới (`profiles`, `quiz_sets`, `attempts`, `attempt_questions`, `attempt_answer_keys`, `attempt_responses`, `quiz_reviews`) + triggers + RPC transactions.
+2. `20261120000002_rls_and_grants.sql` — Dọn dẹp policy cũ, thu hồi quyền truy cập trực tiếp `question_answers` & `attempt_answer_keys`, bật và áp dụng RLS cho cả 11 bảng.
+3. `20261120000003_storage_buckets_and_policies.sql` — Khởi tạo 2 private buckets (`exam-documents`, `question-assets`) và Storage RLS policies.
