@@ -7,7 +7,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -276,15 +275,15 @@ export function AppLayout() {
                     </span>
                     <ChevronDown className="size-3.5 text-slate-400" />
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-52">
-                    <DropdownMenuLabel className="text-xs">
+                  <DropdownMenuContent align="end" className="min-w-52">
+                    <div className="px-2 py-1.5 text-xs">
                       <p className="font-semibold text-slate-900 truncate">
                         {displayName}
                       </p>
                       <p className="text-[11px] font-normal text-slate-500 truncate">
                         {user?.email}
                       </p>
-                    </DropdownMenuLabel>
+                    </div>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => navigate("/dashboard")}>
                       Tổng quan
