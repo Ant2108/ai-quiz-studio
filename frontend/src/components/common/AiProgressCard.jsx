@@ -47,6 +47,8 @@ function AiProgressInner({
   const etaText =
     basePercent >= 100
       ? "Hoàn tất!"
+      : elapsedSeconds >= 10 && !currentMessage?.includes("chuyển sang")
+      ? "Đang thử model dự phòng nếu model chính bận..."
       : remaining > 0
       ? `Ước tính còn ~${remaining}s (tổng ~${safeEstimated}s)`
       : "AI đang xử lý dữ liệu lớn, vui lòng đợi thêm giây lát...";

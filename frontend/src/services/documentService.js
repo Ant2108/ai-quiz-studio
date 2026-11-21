@@ -192,13 +192,25 @@ export const documentService = {
       throw new Error(`Không thể lưu bản ghi tài liệu: ${dbError?.message || "DB error"}`);
     }
 
-    onProgress({ step: "processing_ai", percent: 80, message: "Đang phân tích tài liệu bằng Gemini AI..." });
+    onProgress({
+      step: "processing_ai",
+      percent: 80,
+      message: "Đang xử lý bằng Gemini 3.8 Flash...",
+    });
 
     const processedResult = await this.processDocument(docRecord.id, clientExtraction);
 
-    onProgress({ step: "completed", percent: 100, message: "Hoàn tất phân tích tài liệu!" });
+    onProgress({
+      step: "completed",
+      percent: 100,
+      aiMeta: processedResult?.ai_meta || null,
+      message: "Hoàn tất phân tích tài liệu!",
+    });
 
-    return processedResult.document || docRecord;
+    const finalDoc = processedResult.document || docRecord;
+    return processedResult?.ai_meta
+      ? { ...finalDoc, ai_meta: processedResult.ai_meta }
+      : finalDoc;
   },
 
   /**

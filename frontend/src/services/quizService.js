@@ -59,79 +59,101 @@ export const quizService = {
     let quizSet = null;
     let allPreviewQuestions = [];
     let completedCount = 0;
+    let activeModelId = "gemini-3.8-flash";
+    let activeModelName = "Gemini 3.8 Flash";
+    let lastAiMeta = null;
 
-    for (let i = 0; i < batchCounts.length; i++) {
-      const batchCount = batchCounts[i];
-      const basePercent = Math.round((completedCount / total) * 90) + 5;
+    try {
+      for (let i = 0; i < batchCounts.length; i++) {
+        const batchCount = batchCounts[i];
+        const basePercent = Math.round((completedCount / total) * 90) + 5;
 
-      onProgress({
-        step: "generating",
-        percent: basePercent,
-        completedQuestions: completedCount,
-        totalQuestions: total,
-        batchIndex: i,
-        totalBatches: batchCounts.length,
-        message:
-          batchCounts.length > 1
-            ? `Đợt ${i + 1}/${batchCounts.length}: Đang sinh ${batchCount} câu (${completedCount}/${total} câu)...`
-            : `Gemini AI đang biên soạn ${batchCount} câu hỏi...`,
-      });
+        const statusMessage =
+          lastAiMeta?.fallback_triggered
+            ? `Gemini 3.8 Flash đã hết quota. Đang chuyển sang ${activeModelName}... (${completedCount}/${total} câu)`
+            : batchCounts.length > 1
+            ? `Đang xử lý bằng ${activeModelName} (Đợt ${i + 1}/${batchCounts.length}: ${completedCount}/${total} câu)...`
+            : `Đang xử lý bằng ${activeModelName}...`;
 
-      if (i > 0) {
-        // Gentle pause between batches to respect Gemini Free Tier RPM limits
-        await new Promise((r) => setTimeout(r, 1500));
-      }
+        onProgress({
+          step: "generating",
+          percent: basePercent,
+          completedQuestions: completedCount,
+          totalQuestions: total,
+          batchIndex: i,
+          totalBatches: batchCounts.length,
+          modelName: activeModelName,
+          message: statusMessage,
+        });
 
-      let batchResponse = null;
-      for (let attempt = 0; attempt <= 2; attempt++) {
-        try {
-          batchResponse = await invokeEdgeFunction("generate-quiz", {
-            document_id: documentId,
-            quiz_set_id: quizSet?.id || null,
-            chunk_index: i,
-            title,
-            description,
-            subject,
-            topic,
-            difficulty,
-            question_count: batchCount,
-            question_types: questionTypes,
-            default_exam_questions: Number(defaultExamQuestions),
-            default_exam_duration: Number(defaultExamDuration),
-          });
-          break;
-        } catch (err) {
-          const msg = err?.message || "";
-          const isRateLimit =
-            err?.status === 429 ||
-            msg.includes("429") ||
-            msg.includes("Quota") ||
-            msg.includes("Rate Limit");
-
-          if (isRateLimit && attempt < 2) {
-            onProgress({
-              step: "rate_limit_wait",
-              percent: basePercent,
-              completedQuestions: completedCount,
-              totalQuestions: total,
-              batchIndex: i,
-              totalBatches: batchCounts.length,
-              message: `AI Free Tier đang bận, tự động đợi 5 giây trước khi thử lại đợt ${i + 1}/${batchCounts.length}...`,
-            });
-            await new Promise((r) => setTimeout(r, 5000));
-            continue;
-          }
-          throw err;
+        if (i > 0) {
+          await new Promise((r) => setTimeout(r, 1500));
         }
-      }
 
-      if (batchResponse?.quiz_set) {
-        quizSet = batchResponse.quiz_set;
+        let batchResponse = null;
+        for (let attempt = 0; attempt <= 2; attempt++) {
+          try {
+            batchResponse = await invokeEdgeFunction("generate-quiz", {
+              document_id: documentId,
+              quiz_set_id: quizSet?.id || null,
+              chunk_index: i,
+              preferred_model: i > 0 ? activeModelId : null,
+              title,
+              description,
+              subject,
+              topic,
+              difficulty,
+              question_count: batchCount,
+              question_types: questionTypes,
+              default_exam_questions: Number(defaultExamQuestions),
+              default_exam_duration: Number(defaultExamDuration),
+            });
+            break;
+          } catch (err) {
+            const msg = err?.message || "";
+            const isRateLimit =
+              err?.status === 429 ||
+              msg.includes("429") ||
+              msg.includes("Quota") ||
+              msg.includes("Rate Limit") ||
+              msg.includes("quota");
+
+            if (isRateLimit && attempt < 2) {
+              onProgress({
+                step: "rate_limit_wait",
+                percent: basePercent,
+                completedQuestions: completedCount,
+                totalQuestions: total,
+                batchIndex: i,
+                totalBatches: batchCounts.length,
+                message: "Đang thử model dự phòng...",
+              });
+              await new Promise((r) => setTimeout(r, 4000));
+              continue;
+            }
+            throw err;
+          }
+        }
+
+        if (batchResponse?.ai_meta) {
+          lastAiMeta = batchResponse.ai_meta;
+          activeModelId = batchResponse.ai_meta.model_id || activeModelId;
+          activeModelName = batchResponse.ai_meta.model_name || activeModelName;
+        }
+        if (batchResponse?.quiz_set) {
+          quizSet = batchResponse.quiz_set;
+        }
+        if (Array.isArray(batchResponse?.preview_questions)) {
+          allPreviewQuestions = [...allPreviewQuestions, ...batchResponse.preview_questions];
+        }
+        completedCount += batchResponse?.preview_questions?.length || batchCount;
       }
-      if (Array.isArray(batchResponse?.preview_questions)) {
-        allPreviewQuestions = [...allPreviewQuestions, ...batchResponse.preview_questions];
+    } catch (err) {
+      // Do not leave partial quiz records if a subsequent batch fails
+      if (quizSet?.id) {
+        await this.softDeleteQuiz(quizSet.id).catch(() => {});
       }
-      completedCount += batchResponse?.preview_questions?.length || batchCount;
+      throw err;
     }
 
     onProgress({
@@ -141,7 +163,9 @@ export const quizService = {
       totalQuestions: total,
       batchIndex: batchCounts.length,
       totalBatches: batchCounts.length,
-      message: `Hoàn tất! Đã tạo ${allPreviewQuestions.length || completedCount} câu hỏi.`,
+      modelName: activeModelName,
+      aiMeta: lastAiMeta,
+      message: "Tạo đề thành công!",
     });
 
     return {
@@ -149,6 +173,7 @@ export const quizService = {
       quiz_set: quizSet,
       question_count: allPreviewQuestions.length || completedCount,
       preview_questions: allPreviewQuestions,
+      ai_meta: lastAiMeta,
     };
   },
 

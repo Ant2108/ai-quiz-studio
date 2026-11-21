@@ -133,7 +133,13 @@ export function GenerateQuizPage() {
       });
 
       setGeneratedResult(result);
-      toast.success(`Đã tạo thành công bộ đề ${result.question_count} câu hỏi!`);
+      if (result?.ai_meta?.fallback_triggered) {
+        toast.success(
+          `Tạo đề thành công bằng ${result.ai_meta.model_name} (tự động chuyển dự phòng) — ${result.question_count} câu hỏi!`,
+        );
+      } else {
+        toast.success(`Tạo đề thành công! (${result.question_count} câu hỏi)`);
+      }
     } catch (err) {
       const msg = err.message || "Không thể sinh bộ đề từ tài liệu này.";
       setLocalError(msg);
@@ -489,7 +495,7 @@ export function GenerateQuizPage() {
               <div className="space-y-1">
                 <div className="inline-flex items-center gap-1.5 text-emerald-700 text-xs font-bold uppercase">
                   <CheckCircle2 className="size-4" />
-                  <span>Đã lưu bản nháp Private thành công</span>
+                  <span>Tạo đề thành công! Đã lưu bản nháp Private</span>
                 </div>
                 <CardTitle className="text-xl font-bold text-slate-900">
                   {generatedResult.quiz_set?.title} ({generatedResult.question_count} câu hỏi)
@@ -497,6 +503,13 @@ export function GenerateQuizPage() {
                 <CardDescription className="text-xs">
                   Đáp án đúng đã được lưu bảo mật trên máy chủ. Bạn có thể ôn tập ngay, mở trình biên tập hoặc gửi duyệt Public.
                 </CardDescription>
+                {generatedResult.ai_meta && (
+                  <p className="text-xs text-slate-600 pt-1">
+                    {generatedResult.ai_meta.fallback_triggered
+                      ? `Gemini 3.8 Flash đã hết quota — Đã tự động tạo thành công bằng ${generatedResult.ai_meta.model_name}.`
+                      : `Xử lý bằng ${generatedResult.ai_meta.model_name}.`}
+                  </p>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">

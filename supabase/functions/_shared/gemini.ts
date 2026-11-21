@@ -1,41 +1,93 @@
 // ============================================================================
-// SHARED HELPER: GOOGLE GEMINI AI SERVICE
+// SHARED HELPER: GOOGLE GEMINI AI SERVICE WITH AUTOMATIC FALLBACK
 // Features:
 //   - Uses GEMINI_API_KEY exclusively from Edge Function Secrets (Deno.env)
-//   - Supports current Free Tier model gemini-2.5-flash (with fallback to gemini-2.0-flash)
-//   - Timeout (AbortController), bounded exponential backoff retry, and 429 Quota handling
-//   - Native DOCX XML extraction, TXT reading, and Multimodal PDF / Image OCR
-//   - Document chunking & batched quiz generation for large question counts (up to 120)
+//   - Centralized configurable model fallback chain:
+//       1. gemini-3.8-flash (Gemini 3.8 Flash - Primary)
+//       2. gemini-3-flash-preview (Gemini 3 Flash - Secondary)
+//       3. gemini-flash-lite-latest (Gemini Flash-Lite - Fallback)
+//   - Intelligent error classification (RPD vs RPM vs TPM vs 503 vs 401/403 vs 400)
+//   - Reuses single Storage/Gemini uploaded PDF across fallback models
+//   - Zero-external-dependency chunked Base64 + DecompressionStream DOCX extraction
 //   - Strict JSON schema validation via validateGeneratedQuizPayload
 // ============================================================================
 
-import { encodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
 import { AppError } from "./response.ts";
 import {
-  ValidatedGeneratedQuestion,
-  ValidatedGeneratedQuiz,
+  type GeminiInputType,
+  type GeminiModelConfig,
+  getActiveGeminiModels,
+} from "./gemini-models.ts";
+import { classifyGeminiApiError } from "./gemini-errors.ts";
+import {
+  type ValidatedGeneratedQuestion,
+  type ValidatedGeneratedQuiz,
   validateGeneratedQuizPayload,
 } from "./validation.ts";
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_UPLOAD_API = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const GEMINI_FILES_API = "https://generativelanguage.googleapis.com/v1beta";
-const DEFAULT_MODELS = [
-  "gemini-3-flash-preview",
-  "gemini-3.8-flash",
-  "gemini-3.8-flash-lite-preview",
-  "gemini-flash-latest",
-  "gemini-flash-lite-latest",
-];
-const REQUEST_TIMEOUT_MS = 50_000;
-const MAX_RETRIES = 2;
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 50_000;
+const MAX_TRANSIENT_RETRIES = 2; // Bounded retry count for RPM / TPM / 503
+const MAX_RETRY_WAIT_MS = 8_000;
 const MAX_CHUNK_CHARS = 16_000;
 const MAX_QUESTIONS_PER_BATCH = 20;
-const QUIZ_BATCH_CONCURRENCY = 1; // Sequential per Edge Function call to respect Gemini Free Tier RPM limits
-const INLINE_DATA_THRESHOLD_BYTES = 1_500_000; // 1.5 MB: use Gemini Files API above this to avoid Edge Function OOM/CPU 546
+const INLINE_DATA_THRESHOLD_BYTES = 1_500_000; // 1.5 MB threshold for Gemini Files API
 
-function getGeminiApiKey(): string {
-  const apiKey = Deno.env.get("GEMINI_API_KEY");
+export interface GeminiAttemptTrace {
+  modelId: string;
+  displayName: string;
+  status: "succeeded" | "switched" | "failed";
+  category?: string;
+  retries: number;
+  message: string;
+}
+
+export interface GeminiExecutionMeta {
+  model_id: string;
+  model_name: string;
+  fallback_triggered: boolean;
+  status_messages: string[];
+  attempts: GeminiAttemptTrace[];
+}
+
+export interface GeminiRuntimeDeps {
+  fetchImpl?: typeof fetch;
+  sleepImpl?: (ms: number) => Promise<void>;
+  apiKeyOverride?: string;
+  modelRegistry?: GeminiModelConfig[];
+  preferredModelId?: string | null;
+  requestTimeoutMs?: number;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    parts.push(String.fromCharCode(...slice));
+  }
+  return btoa(parts.join(""));
+}
+
+function getGeminiApiKey(override?: string): string {
+  if (override !== undefined) {
+    if (!override.trim()) {
+      throw new AppError(
+        "Chưa cấu hình GEMINI_API_KEY trong Supabase Edge Function Secrets.",
+        500,
+        "MISSING_GEMINI_API_KEY",
+      );
+    }
+    return override.trim();
+  }
+  const apiKey = typeof Deno !== "undefined" ? Deno.env?.get?.("GEMINI_API_KEY") : undefined;
   if (!apiKey || apiKey.trim() === "") {
     throw new AppError(
       "Chưa cấu hình GEMINI_API_KEY trong Supabase Edge Function Secrets.",
@@ -44,18 +96,6 @@ function getGeminiApiKey(): string {
     );
   }
   return apiKey.trim();
-}
-
-function getCandidateModels(): string[] {
-  const configured = Deno.env.get("GEMINI_MODEL")?.trim();
-  if (configured) {
-    return [configured, ...DEFAULT_MODELS.filter((m) => m !== configured)];
-  }
-  return DEFAULT_MODELS;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -101,7 +141,7 @@ export async function extractTextFromDocxBytes(bytes: Uint8Array): Promise<strin
   while (offset + 30 <= bytes.length) {
     const signature = view.getUint32(offset, true);
     if (signature !== 0x04034b50) {
-      break; // Reached central directory or non-local file header
+      break;
     }
 
     const compressionMethod = view.getUint16(offset + 8, true);
@@ -150,7 +190,6 @@ export async function extractTextFromDocxBytes(bytes: Uint8Array): Promise<strin
     offset = dataEnd;
   }
 
-  // Fallback: extract printable UTF-8 segments if non-standard ZIP streaming header is used
   const fallbackRaw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   const xmlMatches = fallbackRaw.match(/<w:t[^>]*>([^<]+)<\/w:t>/g);
   if (xmlMatches && xmlMatches.length > 0) {
@@ -164,28 +203,63 @@ export async function extractTextFromDocxBytes(bytes: Uint8Array): Promise<strin
 }
 
 /**
- * Low-level Gemini API call with timeout, model fallback, and bounded exponential backoff retry.
+ * Core Gemini generateContent executor with:
+ *   - Configurable priority fallback chain
+ *   - Intelligent error classification (RPD -> immediate switch, RPM/TPM -> RetryInfo delay then switch,
+ *     503 -> exponential backoff then switch, 401/403/400 -> fail cleanly)
+ *   - Traceable status messages for frontend UI
  */
-async function callGeminiGenerateContent(params: {
+export async function callGeminiGenerateContent(params: {
   parts: Array<Record<string, unknown>>;
   systemInstruction?: string;
   responseMimeType?: string;
   temperature?: number;
   disableThinking?: boolean;
-}): Promise<string> {
-  const apiKey = getGeminiApiKey();
-  const models = getCandidateModels();
-  let lastError: unknown = null;
+  requiredInput?: GeminiInputType;
+  deps?: GeminiRuntimeDeps;
+}): Promise<{ text: string; meta: GeminiExecutionMeta }> {
+  const deps = params.deps ?? {};
+  const fetchFn = deps.fetchImpl ?? fetch;
+  const sleepFn = deps.sleepImpl ?? defaultSleep;
+  const timeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const apiKey = getGeminiApiKey(deps.apiKeyOverride);
 
-  for (const model of models) {
-    let useThinkingConfig = Boolean(params.disableThinking);
+  const models = getActiveGeminiModels({
+    requiredInput: params.requiredInput,
+    preferredModelId: deps.preferredModelId,
+    registry: deps.modelRegistry,
+  });
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  if (models.length === 0) {
+    throw new AppError(
+      "Không có model Gemini AI nào được kích hoạt cho định dạng tài liệu này.",
+      500,
+      "NO_ENABLED_GEMINI_MODELS",
+    );
+  }
+
+  const attempts: GeminiAttemptTrace[] = [];
+  const statusMessages: string[] = [];
+  let lastError: AppError | null = null;
+  let lastWasQuota = false;
+
+  for (let mIdx = 0; mIdx < models.length; mIdx++) {
+    const modelCfg = models[mIdx];
+    const hasNextModel = mIdx < models.length - 1;
+    const nextModelCfg = hasNextModel ? models[mIdx + 1] : null;
+    let useThinkingConfig = Boolean(params.disableThinking && modelCfg.supportsThinkingConfig);
+    let retriesOnCurrentModel = 0;
+
+    if (mIdx === 0) {
+      statusMessages.push(`Đang xử lý bằng ${modelCfg.displayName}...`);
+    }
+
+    for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const endpoint = `${GEMINI_API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const endpoint = `${GEMINI_API_BASE}/${modelCfg.id}:generateContent?key=${encodeURIComponent(apiKey)}`;
         const generationConfig: Record<string, unknown> = {
           temperature: params.temperature ?? 0.2,
           ...(params.responseMimeType
@@ -213,7 +287,7 @@ async function callGeminiGenerateContent(params: {
           };
         }
 
-        const res = await fetch(endpoint, {
+        const res = await fetchFn(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -222,60 +296,108 @@ async function callGeminiGenerateContent(params: {
 
         clearTimeout(timeoutId);
 
-        if (res.status === 400 && useThinkingConfig) {
+        if (!res.ok) {
           const errBody = await res.text().catch(() => "");
-          if (errBody.toLowerCase().includes("thinking")) {
+
+          // Graceful fallback if this model rejects thinkingConfig
+          if (
+            res.status === 400 &&
+            useThinkingConfig &&
+            errBody.toLowerCase().includes("thinking")
+          ) {
             useThinkingConfig = false;
             continue;
           }
-          throw new AppError(
-            `Gemini API trả về lỗi (400). ${errBody.slice(0, 200)}`,
-            502,
-            "GEMINI_API_ERROR",
-          );
-        }
 
-        if (res.status === 429) {
-          const hasNextModel = models.indexOf(model) < models.length - 1;
-          if (hasNextModel) {
-            // Quota of this model exhausted (RPM/RPD) -> switch to next model immediately
-            lastError = new AppError(
-              `Model ${model} đã hết quota (429).`,
-              429,
-              "GEMINI_QUOTA_EXCEEDED",
-            );
-            break;
+          const classified = classifyGeminiApiError(res.status, errBody, modelCfg.displayName);
+
+          if (classified.category === "AUTH_ERROR") {
+            attempts.push({
+              modelId: modelCfg.id,
+              displayName: modelCfg.displayName,
+              status: "failed",
+              category: classified.category,
+              retries: retriesOnCurrentModel,
+              message: classified.userMessage,
+            });
+            throw new AppError(classified.userMessage, 401, "GEMINI_AUTH_ERROR");
           }
-          if (attempt < MAX_RETRIES) {
-            await sleep(2000 * Math.pow(2, attempt));
+
+          if (classified.category === "BAD_REQUEST_400") {
+            attempts.push({
+              modelId: modelCfg.id,
+              displayName: modelCfg.displayName,
+              status: "failed",
+              category: classified.category,
+              retries: retriesOnCurrentModel,
+              message: classified.userMessage,
+            });
+            throw new AppError(classified.userMessage, 400, "GEMINI_INVALID_REQUEST");
+          }
+
+          if (classified.category === "RPD_EXCEEDED" || classified.category === "MODEL_NOT_FOUND_404" || classified.action === "switch_model") {
+            lastWasQuota = classified.httpStatus === 429;
+            lastError = new AppError(
+              classified.userMessage,
+              classified.httpStatus === 429 ? 429 : 502,
+              classified.category,
+            );
+            attempts.push({
+              modelId: modelCfg.id,
+              displayName: modelCfg.displayName,
+              status: hasNextModel ? "switched" : "failed",
+              category: classified.category,
+              retries: retriesOnCurrentModel,
+              message: classified.userMessage,
+            });
+            if (nextModelCfg) {
+              statusMessages.push(
+                `${modelCfg.displayName} đã hết quota. Đang chuyển sang ${nextModelCfg.displayName}...`,
+              );
+            }
+            break; // Immediately switch to next model
+          }
+
+          // retry_then_switch: RPM_EXCEEDED, TPM_EXCEEDED, OVERLOADED_503, SERVER_ERROR_5XX
+          if (attempt < MAX_TRANSIENT_RETRIES) {
+            retriesOnCurrentModel++;
+            const fallbackDelayMs =
+              classified.category === "OVERLOADED_503"
+                ? 1000 * Math.pow(2, attempt)
+                : 1500 * Math.pow(2, attempt);
+            const waitMs = Math.min(
+              classified.retryDelayMs ?? fallbackDelayMs,
+              MAX_RETRY_WAIT_MS,
+            );
+            if (classified.category === "RPM_EXCEEDED" || classified.category === "TPM_EXCEEDED") {
+              statusMessages.push(
+                `${modelCfg.displayName} chạm giới hạn tốc độ, đang thử lại (${retriesOnCurrentModel}/${MAX_TRANSIENT_RETRIES})...`,
+              );
+            }
+            await sleepFn(waitMs);
             continue;
           }
-          throw new AppError(
-            "Tất cả model Gemini đều đang vượt giới hạn Free Tier (429). Vui lòng đợi 1 phút và thử lại.",
-            429,
-            "GEMINI_QUOTA_EXCEEDED",
-          );
-        }
 
-        if (res.status === 404) {
-          // Model unavailable for this key/region -> try next model
-          if (!lastError) {
-            lastError = new AppError(`Model ${model} không khả dụng (404).`, 502, "GEMINI_MODEL_NOT_FOUND");
+          lastWasQuota = classified.httpStatus === 429;
+          lastError = new AppError(
+            classified.userMessage,
+            classified.httpStatus === 429 ? 429 : classified.httpStatus >= 500 ? 503 : 502,
+            classified.category,
+          );
+          attempts.push({
+            modelId: modelCfg.id,
+            displayName: modelCfg.displayName,
+            status: hasNextModel ? "switched" : "failed",
+            category: classified.category,
+            retries: retriesOnCurrentModel,
+            message: classified.userMessage,
+          });
+          if (nextModelCfg) {
+            statusMessages.push(
+              `${modelCfg.displayName} gặp sự cố. Đang thử model dự phòng (${nextModelCfg.displayName})...`,
+            );
           }
           break;
-        }
-
-        if (!res.ok) {
-          const errBody = await res.text().catch(() => "");
-          if (res.status >= 500 && attempt < MAX_RETRIES) {
-            await sleep(1000 * Math.pow(2, attempt));
-            continue;
-          }
-          throw new AppError(
-            `Gemini API trả về lỗi (${res.status}). ${errBody.slice(0, 200)}`,
-            502,
-            "GEMINI_API_ERROR",
-          );
         }
 
         const data = await res.json();
@@ -292,38 +414,115 @@ async function callGeminiGenerateContent(params: {
           );
         }
 
-        return candidateText.trim();
+        attempts.push({
+          modelId: modelCfg.id,
+          displayName: modelCfg.displayName,
+          status: "succeeded",
+          retries: retriesOnCurrentModel,
+          message: `Hoàn tất bằng ${modelCfg.displayName}`,
+        });
+
+        return {
+          text: candidateText.trim(),
+          meta: {
+            model_id: modelCfg.id,
+            model_name: modelCfg.displayName,
+            fallback_triggered: mIdx > 0,
+            status_messages: statusMessages,
+            attempts,
+          },
+        };
       } catch (err) {
         clearTimeout(timeoutId);
-        lastError = err;
 
-        if (err instanceof DOMException && err.name === "AbortError") {
-          // Do not retry full 50s timeouts multiple times to avoid hitting Supabase Edge Function wall-clock limit (546)
-          throw new AppError(
-            "Yêu cầu xử lý AI quá thời gian chờ (Timeout 50s). Vui lòng thử lại hoặc giảm số câu hỏi mỗi lần tạo.",
+        if (err instanceof AppError) {
+          // Do not fall back on fatal auth/client validation/empty response errors
+          if (
+            err.code === "GEMINI_AUTH_ERROR" ||
+            err.code === "GEMINI_INVALID_REQUEST" ||
+            err.code === "GEMINI_EMPTY_RESPONSE"
+          ) {
+            throw err;
+          }
+          lastError = err;
+          break;
+        }
+
+        const isAbort =
+          (err instanceof DOMException && err.name === "AbortError") ||
+          (err instanceof Error && err.name === "AbortError");
+
+        if (isAbort) {
+          lastError = new AppError(
+            `Yêu cầu tới ${modelCfg.displayName} quá thời gian chờ (Timeout).`,
             504,
             "GEMINI_TIMEOUT",
           );
+          attempts.push({
+            modelId: modelCfg.id,
+            displayName: modelCfg.displayName,
+            status: hasNextModel ? "switched" : "failed",
+            category: "NETWORK_TIMEOUT",
+            retries: retriesOnCurrentModel,
+            message: `${modelCfg.displayName} quá thời gian chờ.`,
+          });
+          if (nextModelCfg) {
+            statusMessages.push(`Đang thử model dự phòng (${nextModelCfg.displayName})...`);
+          }
+          break; // Switch to faster fallback model without looping timeouts
         }
 
-        if (err instanceof AppError && err.statusCode === 429) {
-          if (models.indexOf(model) < models.length - 1) break;
-          throw err;
-        }
-
-        if (attempt < MAX_RETRIES) {
-          await sleep(1000 * Math.pow(2, attempt));
+        // Transient network error
+        if (attempt < MAX_TRANSIENT_RETRIES) {
+          retriesOnCurrentModel++;
+          await sleepFn(1000 * Math.pow(2, attempt));
           continue;
         }
+
+        lastError = new AppError(
+          err instanceof Error ? err.message : "Không thể kết nối tới dịch vụ Gemini AI.",
+          502,
+          "GEMINI_NETWORK_ERROR",
+        );
+        attempts.push({
+          modelId: modelCfg.id,
+          displayName: modelCfg.displayName,
+          status: hasNextModel ? "switched" : "failed",
+          category: "NETWORK_ERROR",
+          retries: retriesOnCurrentModel,
+          message: lastError.message,
+        });
+        if (nextModelCfg) {
+          statusMessages.push(`Đang thử model dự phòng (${nextModelCfg.displayName})...`);
+        }
+        break;
       }
     }
   }
 
-  if (lastError instanceof AppError) throw lastError;
+  if (lastWasQuota) {
+    throw new AppError(
+      "Tất cả model Gemini (3.8 Flash, 3 Flash, Flash-Lite) đều đang vượt giới hạn quota Free Tier. Vui lòng đợi ít phút rồi thử lại.",
+      429,
+      "GEMINI_ALL_MODELS_QUOTA_EXCEEDED",
+      { attempts },
+    );
+  }
+
+  if (lastError) {
+    throw new AppError(
+      lastError.message,
+      lastError.statusCode,
+      lastError.code,
+      { attempts },
+    );
+  }
+
   throw new AppError(
-    lastError instanceof Error ? lastError.message : "Không thể kết nối tới dịch vụ Gemini AI.",
+    "Không thể kết nối tới dịch vụ Gemini AI trên tất cả các model khả dụng.",
     502,
     "GEMINI_UNAVAILABLE",
+    { attempts },
   );
 }
 
@@ -339,7 +538,6 @@ export function parseGeminiJson(rawText: string): unknown {
   try {
     return JSON.parse(cleaned);
   } catch {
-    // Attempt to locate outer JSON object or array
     const firstBrace = cleaned.indexOf("{");
     const lastBrace = cleaned.lastIndexOf("}");
     if (firstBrace !== -1 && lastBrace > firstBrace) {
@@ -364,23 +562,29 @@ export interface DocumentAnalysisResult {
     key_concepts: string[];
     recommended_question_count: number;
   };
+  aiMeta: GeminiExecutionMeta;
 }
 
 /**
- * Uploads binary bytes directly to Google Gemini Files API (avoids base64 memory/CPU spikes on Edge Runtime).
+ * Uploads binary bytes ONCE to Google Gemini Files API so fallback models reuse the same fileUri.
  */
 async function uploadBytesToGeminiFilesApi(params: {
   fileBytes: Uint8Array;
   mimeType: string;
   displayName: string;
+  deps?: GeminiRuntimeDeps;
 }): Promise<{ fileUri: string; fileResourceName: string }> {
-  const apiKey = getGeminiApiKey();
+  const deps = params.deps ?? {};
+  const fetchFn = deps.fetchImpl ?? fetch;
+  const sleepFn = deps.sleepImpl ?? defaultSleep;
+  const timeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const apiKey = getGeminiApiKey(deps.apiKeyOverride);
+
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // Step 1: Initiate resumable upload
-    const startRes = await fetch(`${GEMINI_UPLOAD_API}?key=${encodeURIComponent(apiKey)}`, {
+    const startRes = await fetchFn(`${GEMINI_UPLOAD_API}?key=${encodeURIComponent(apiKey)}`, {
       method: "POST",
       headers: {
         "X-Goog-Upload-Protocol": "resumable",
@@ -395,10 +599,13 @@ async function uploadBytesToGeminiFilesApi(params: {
 
     if (!startRes.ok) {
       const errText = await startRes.text().catch(() => "");
+      const classified = classifyGeminiApiError(startRes.status, errText, "Gemini Files API");
       throw new AppError(
-        `Không thể khởi tạo upload tài liệu lên Gemini Files API (${startRes.status}): ${errText.slice(0, 150)}`,
-        502,
-        "GEMINI_FILE_UPLOAD_INIT_FAILED",
+        classified.category === "AUTH_ERROR"
+          ? classified.userMessage
+          : `Không thể khởi tạo upload tài liệu lên Gemini Files API (${startRes.status}).`,
+        classified.httpStatus === 401 || classified.httpStatus === 403 ? 401 : 502,
+        classified.category === "AUTH_ERROR" ? "GEMINI_AUTH_ERROR" : "GEMINI_FILE_UPLOAD_INIT_FAILED",
       );
     }
 
@@ -411,8 +618,7 @@ async function uploadBytesToGeminiFilesApi(params: {
       );
     }
 
-    // Step 2: Upload raw binary bytes without base64 encoding
-    const uploadRes = await fetch(uploadUrl, {
+    const uploadRes = await fetchFn(uploadUrl, {
       method: "POST",
       headers: {
         "Content-Length": String(params.fileBytes.byteLength),
@@ -445,10 +651,9 @@ async function uploadBytesToGeminiFilesApi(params: {
       );
     }
 
-    // Wait briefly if Gemini is still indexing the uploaded file
     for (let i = 0; i < 6 && fileState === "PROCESSING"; i++) {
-      await sleep(1500);
-      const checkRes = await fetch(
+      await sleepFn(1500);
+      const checkRes = await fetchFn(
         `${GEMINI_FILES_API}/${fileResourceName}?key=${encodeURIComponent(apiKey)}`,
         { signal: controller.signal },
       );
@@ -457,8 +662,8 @@ async function uploadBytesToGeminiFilesApi(params: {
         fileState = checkData?.state;
         if (fileState === "FAILED") {
           throw new AppError(
-            "Gemini không thể đọc định dạng tài liệu này.",
-            422,
+            "Tài liệu PDF không hợp lệ hoặc Gemini không thể đọc định dạng này.",
+            400,
             "GEMINI_FILE_PROCESSING_FAILED",
           );
         }
@@ -467,7 +672,10 @@ async function uploadBytesToGeminiFilesApi(params: {
 
     return { fileUri, fileResourceName };
   } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
+    const isAbort =
+      (err instanceof DOMException && err.name === "AbortError") ||
+      (err instanceof Error && err.name === "AbortError");
+    if (isAbort) {
       throw new AppError(
         "Quá thời gian tải tài liệu lên Gemini AI (Timeout). Vui lòng thử lại.",
         504,
@@ -480,10 +688,14 @@ async function uploadBytesToGeminiFilesApi(params: {
   }
 }
 
-async function deleteGeminiFileBestEffort(fileResourceName: string): Promise<void> {
+async function deleteGeminiFileBestEffort(
+  fileResourceName: string,
+  deps?: GeminiRuntimeDeps,
+): Promise<void> {
   try {
-    const apiKey = getGeminiApiKey();
-    await fetch(`${GEMINI_FILES_API}/${fileResourceName}?key=${encodeURIComponent(apiKey)}`, {
+    const fetchFn = deps?.fetchImpl ?? fetch;
+    const apiKey = getGeminiApiKey(deps?.apiKeyOverride);
+    await fetchFn(`${GEMINI_FILES_API}/${fileResourceName}?key=${encodeURIComponent(apiKey)}`, {
       method: "DELETE",
     });
   } catch {
@@ -492,8 +704,8 @@ async function deleteGeminiFileBestEffort(fileResourceName: string): Promise<voi
 }
 
 /**
- * Analyzes an uploaded document (PDF, DOCX, TXT, or Image) with Gemini AI.
- * Performs OCR on images/scanned PDFs and extracts structured metadata + full text.
+ * Analyzes an uploaded document (PDF, DOCX, TXT, or Image) with automatic Gemini model fallback.
+ * Reuses the same uploaded file/bytes when switching between fallback models.
  */
 export async function analyzeDocumentWithGemini(params: {
   fileBytes: Uint8Array;
@@ -502,8 +714,17 @@ export async function analyzeDocumentWithGemini(params: {
   ext: string;
   clientExtractedText?: string | null;
   clientPageCount?: number | null;
+  deps?: GeminiRuntimeDeps;
 }): Promise<DocumentAnalysisResult> {
-  const { fileBytes, fileName, mimeType, ext, clientExtractedText, clientPageCount } = params;
+  const {
+    fileBytes,
+    fileName,
+    mimeType,
+    ext,
+    clientExtractedText,
+    clientPageCount,
+    deps,
+  } = params;
 
   let rawText = (clientExtractedText || "").trim();
 
@@ -532,56 +753,62 @@ export async function analyzeDocumentWithGemini(params: {
 
   const parts: Array<Record<string, unknown>> = [];
   let uploadedGeminiFileName: string | null = null;
+  let requiredInput: GeminiInputType = "text";
 
   if (rawText.length > 0) {
-    // We already have plain text from TXT, DOCX, or client-side PDF extraction
     const chunks = chunkDocumentText(rawText, MAX_CHUNK_CHARS);
     const sampleForSummary = chunks.slice(0, 2).join("\n\n---\n\n");
     parts.push({
       text: `${analysisPrompt}\n\nLưu ý: Trường "extracted_text" trong JSON chỉ cần ghi "PROVIDED_IN_TEXT" vì hệ thống đã có văn bản gốc.\n\nNỘI DUNG TÀI LIỆU:\n${sampleForSummary}`,
     });
-  } else if (fileBytes.byteLength > INLINE_DATA_THRESHOLD_BYTES) {
-    // Large PDF / Image: upload raw binary via Gemini Files API to prevent base64 OOM / 546 Worker Error
-    const uploaded = await uploadBytesToGeminiFilesApi({
-      fileBytes,
-      mimeType,
-      displayName: fileName,
-    });
-    uploadedGeminiFileName = uploaded.fileResourceName;
-    parts.push({
-      fileData: {
-        mimeType,
-        fileUri: uploaded.fileUri,
-      },
-    });
-    parts.push({
-      text: analysisPrompt,
-    });
   } else {
-    // Small PDF or Image (<= 1.5 MB): inlineData is fast and safe
-    const base64Data = encodeBase64(fileBytes);
-    parts.push({
-      inlineData: {
+    requiredInput = ext === "pdf" ? "pdf" : "image";
+    if (fileBytes.byteLength > INLINE_DATA_THRESHOLD_BYTES) {
+      // Uploaded ONCE and reused across all fallback attempts
+      const uploaded = await uploadBytesToGeminiFilesApi({
+        fileBytes,
         mimeType,
-        data: base64Data,
-      },
-    });
-    parts.push({
-      text: analysisPrompt,
-    });
+        displayName: fileName,
+        deps,
+      });
+      uploadedGeminiFileName = uploaded.fileResourceName;
+      parts.push({
+        fileData: {
+          mimeType,
+          fileUri: uploaded.fileUri,
+        },
+      });
+      parts.push({ text: analysisPrompt });
+    } else {
+      const base64Data = uint8ArrayToBase64(fileBytes);
+      parts.push({
+        inlineData: {
+          mimeType,
+          data: base64Data,
+        },
+      });
+      parts.push({ text: analysisPrompt });
+    }
   }
 
   let responseText = "";
+  let aiMeta: GeminiExecutionMeta;
+
   try {
-    responseText = await callGeminiGenerateContent({
+    const res = await callGeminiGenerateContent({
       parts,
       systemInstruction,
       responseMimeType: "application/json",
       temperature: 0.1,
+      disableThinking: false,
+      requiredInput,
+      deps,
     });
+    responseText = res.text;
+    aiMeta = res.meta;
   } finally {
     if (uploadedGeminiFileName) {
-      await deleteGeminiFileBestEffort(uploadedGeminiFileName);
+      await deleteGeminiFileBestEffort(uploadedGeminiFileName, deps);
     }
   }
 
@@ -638,13 +865,17 @@ export async function analyzeDocumentWithGemini(params: {
           ? Math.min(120, Math.max(5, Math.round(parsed.recommended_question_count)))
           : 20,
     },
+    aiMeta,
   };
 }
 
+export interface GeneratedQuizWithMeta extends ValidatedGeneratedQuiz {
+  aiMeta: GeminiExecutionMeta;
+}
+
 /**
- * Generates structured quiz questions from document text using Gemini AI.
- * Supports chunking and multi-batch generation for large question counts (up to 120 questions)
- * while strictly enforcing that all questions & answers come from the source content.
+ * Generates structured quiz questions from document text using automatic Gemini model fallback.
+ * Propagates the winning model to subsequent chunks so exhausted models aren't re-attempted.
  */
 export async function generateQuizWithGemini(params: {
   documentText: string;
@@ -655,7 +886,8 @@ export async function generateQuizWithGemini(params: {
   questionCount: number;
   questionTypes: Array<"multiple_choice" | "true_false">;
   startChunkIndex?: number;
-}): Promise<ValidatedGeneratedQuiz> {
+  deps?: GeminiRuntimeDeps;
+}): Promise<GeneratedQuizWithMeta> {
   const {
     documentText,
     title,
@@ -665,6 +897,7 @@ export async function generateQuizWithGemini(params: {
     questionCount,
     questionTypes,
     startChunkIndex = 0,
+    deps = {},
   } = params;
 
   const chunks = chunkDocumentText(documentText, MAX_CHUNK_CHARS);
@@ -677,25 +910,6 @@ export async function generateQuizWithGemini(params: {
   }
 
   const totalBatches = Math.max(1, Math.ceil(questionCount / MAX_QUESTIONS_PER_BATCH));
-  const batchConfigs: Array<{ batchIdx: number; batchCount: number; chunkContent: string }> = [];
-
-  let remaining = questionCount;
-  for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
-    const batchCount =
-      batchIdx === totalBatches - 1
-        ? remaining
-        : Math.min(MAX_QUESTIONS_PER_BATCH, Math.ceil(remaining / (totalBatches - batchIdx)));
-
-    if (batchCount <= 0) break;
-    remaining -= batchCount;
-
-    batchConfigs.push({
-      batchIdx,
-      batchCount,
-      chunkContent: chunks[(startChunkIndex + batchIdx) % chunks.length],
-    });
-  }
-
   const systemInstruction =
     "Bạn là chuyên gia biên soạn đề thi trắc nghiệm học thuật chuẩn xác. " +
     "NGUYÊN TẮC BẮT BUỘC:\n" +
@@ -706,19 +920,28 @@ export async function generateQuizWithGemini(params: {
     "5. Trả về duy nhất JSON hợp lệ theo schema yêu cầu.";
 
   const allValidatedQuestions: ValidatedGeneratedQuestion[] = [];
+  let remaining = questionCount;
+  let activePreferredModel = deps.preferredModelId ?? null;
+  let combinedMeta: GeminiExecutionMeta | null = null;
 
-  for (let i = 0; i < batchConfigs.length; i += QUIZ_BATCH_CONCURRENCY) {
-    const wave = batchConfigs.slice(i, i + QUIZ_BATCH_CONCURRENCY);
-    const waveResults = await Promise.all(
-      wave.map(async ({ batchIdx, batchCount, chunkContent }) => {
-        const prompt = `Hãy tạo chính xác ${batchCount} câu hỏi trắc nghiệm từ nội dung tài liệu bên dưới.
+  for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
+    const batchCount =
+      batchIdx === totalBatches - 1
+        ? remaining
+        : Math.min(MAX_QUESTIONS_PER_BATCH, Math.ceil(remaining / (totalBatches - batchIdx)));
+    if (batchCount <= 0) break;
+    remaining -= batchCount;
+
+    const chunkContent = chunks[(startChunkIndex + batchIdx) % chunks.length];
+
+    const prompt = `Hãy tạo chính xác ${batchCount} câu hỏi trắc nghiệm từ nội dung tài liệu bên dưới.
 Thông tin cấu hình:
 - Tên bộ đề: ${title}
 - Môn học: ${subject || "Theo tài liệu"}
 - Chủ đề trọng tâm: ${topic || "Toàn bộ nội dung trong đoạn tài liệu"}
 - Độ khó mục tiêu: ${difficulty}
 - Các loại câu hỏi được phép sử dụng: ${questionTypes.join(", ")}
-- Phần ${batchIdx + 1}/${totalBatches}: tập trung tạo các câu hỏi khác biệt, không trùng lặp với phần khác.
+- Phần ${startChunkIndex + batchIdx + 1}: tập trung tạo các câu hỏi khác biệt, không trùng lặp với phần khác.
 
 Cấu trúc JSON bắt buộc:
 {
@@ -747,26 +970,37 @@ NỘI DUNG TÀI LIỆU NGUỒN:
 ${chunkContent}
 """`;
 
-        const rawResponse = await callGeminiGenerateContent({
-          parts: [{ text: prompt }],
-          systemInstruction,
-          responseMimeType: "application/json",
-          temperature: 0.25,
-          disableThinking: true,
-        });
+    const { text: rawResponse, meta } = await callGeminiGenerateContent({
+      parts: [{ text: prompt }],
+      systemInstruction,
+      responseMimeType: "application/json",
+      temperature: 0.25,
+      disableThinking: true,
+      requiredInput: "json_output",
+      deps: {
+        ...deps,
+        preferredModelId: activePreferredModel,
+      },
+    });
 
-        const parsedJson = parseGeminiJson(rawResponse);
-        return validateGeneratedQuizPayload(parsedJson, title, difficulty);
-      }),
-    );
+    // If a fallback model succeeded, keep using it for any subsequent batch in this request
+    activePreferredModel = meta.model_id;
+    combinedMeta = meta;
 
-    for (const validatedBatch of waveResults) {
-      allValidatedQuestions.push(...validatedBatch.questions);
-    }
+    const parsedJson = parseGeminiJson(rawResponse);
+    const validatedBatch = validateGeneratedQuizPayload(parsedJson, title, difficulty);
+    allValidatedQuestions.push(...validatedBatch.questions);
   }
 
   return {
     title,
     questions: allValidatedQuestions.slice(0, questionCount),
+    aiMeta: combinedMeta ?? {
+      model_id: activePreferredModel || "gemini-3.8-flash",
+      model_name: "Gemini 3.8 Flash",
+      fallback_triggered: false,
+      status_messages: [],
+      attempts: [],
+    },
   };
 }

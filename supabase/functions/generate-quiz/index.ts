@@ -54,6 +54,10 @@ Deno.serve(async (req: Request) => {
       typeof payload.chunk_index === "number" && Number.isInteger(payload.chunk_index) && payload.chunk_index >= 0
         ? payload.chunk_index
         : 0;
+    const preferredModelId =
+      typeof payload.preferred_model === "string" && payload.preferred_model.trim()
+        ? payload.preferred_model.trim()
+        : null;
 
     // 1. Validate inputs
     const rawTitle = typeof payload.title === "string" ? payload.title.trim() : "";
@@ -175,6 +179,7 @@ Deno.serve(async (req: Request) => {
         fileName: doc.file_name,
         mimeType: normalizedMime,
         ext: normalizedExt,
+        deps: { preferredModelId },
       });
 
       documentText = analysis.extractedText;
@@ -206,6 +211,7 @@ Deno.serve(async (req: Request) => {
       questionCount,
       questionTypes,
       startChunkIndex,
+      deps: { preferredModelId },
     });
 
     const defaultExamQuestions =
@@ -266,6 +272,7 @@ Deno.serve(async (req: Request) => {
         quiz_set: quizSet,
         question_count: txResult.question_count,
         preview_questions: txResult.questions,
+        ai_meta: generated.aiMeta,
       },
       201,
       req,

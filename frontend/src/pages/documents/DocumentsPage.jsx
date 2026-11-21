@@ -92,7 +92,13 @@ export function DocumentsPage() {
       setSuccessDoc(doc);
       setSelectedFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
-      toast.success(`Đã phân tích xong "${doc.file_name}"`);
+      if (doc?.ai_meta?.fallback_triggered) {
+        toast.success(
+          `Đã phân tích xong "${doc.file_name}" bằng ${doc.ai_meta.model_name} (dự phòng)`,
+        );
+      } else {
+        toast.success(`Đã phân tích xong "${doc.file_name}"`);
+      }
     } catch (err) {
       const msg = err.message || "Tải lên hoặc xử lý AI thất bại.";
       setLocalError(msg);
@@ -103,8 +109,14 @@ export function DocumentsPage() {
   const handleReprocess = async (doc) => {
     setReprocessingId(doc.id);
     try {
-      await reprocessDocument(doc.id);
-      toast.success(`Đã phân tích lại tài liệu "${doc.file_name}"`);
+      const res = await reprocessDocument(doc.id);
+      if (res?.ai_meta?.fallback_triggered) {
+        toast.success(
+          `Đã phân tích lại "${doc.file_name}" bằng ${res.ai_meta.model_name} (dự phòng)`,
+        );
+      } else {
+        toast.success(`Đã phân tích lại tài liệu "${doc.file_name}"`);
+      }
     } catch (err) {
       toast.error(err.message || "Không thể phân tích lại tài liệu.");
     } finally {
@@ -239,7 +251,7 @@ export function DocumentsPage() {
                   }
                   currentMessage={
                     reprocessingId
-                      ? "Gemini AI đang trích xuất văn bản & tóm tắt nội dung..."
+                      ? "Đang xử lý bằng Gemini 3.8 Flash..."
                       : progress?.message
                   }
                   basePercent={reprocessingId ? 35 : progress?.percent ?? 10}

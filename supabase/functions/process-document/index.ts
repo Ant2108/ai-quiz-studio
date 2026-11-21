@@ -47,6 +47,10 @@ Deno.serve(async (req: Request) => {
       typeof (body as Record<string, unknown>).page_count === "number"
         ? ((body as Record<string, unknown>).page_count as number)
         : null;
+    const preferredModelId =
+      typeof (body as Record<string, unknown>).preferred_model === "string"
+        ? ((body as Record<string, unknown>).preferred_model as string).trim() || null
+        : null;
 
     // 1. Fetch document and verify ownership
     const { data: doc, error: docError } = await adminClient
@@ -126,6 +130,7 @@ Deno.serve(async (req: Request) => {
       ext: normalizedExt,
       clientExtractedText,
       clientPageCount,
+      deps: { preferredModelId },
     });
 
     const processedAt = new Date().toISOString();
@@ -163,6 +168,7 @@ Deno.serve(async (req: Request) => {
         document: updatedDoc,
         extracted_length: analysis.extractedText.length,
         ai_summary: analysis.summary,
+        ai_meta: analysis.aiMeta,
       },
       200,
       req,
