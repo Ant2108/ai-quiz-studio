@@ -22,11 +22,107 @@ import {
   FileText,
   FileJson,
   Upload,
+  Copy,
+  Code2,
 } from "lucide-react";
+
+const SAMPLE_JSON_ARRAY = JSON.stringify(
+  [
+    {
+      id: 1,
+      question: "Which programming language is used to build Flutter apps?",
+      options: {
+        A: "Java",
+        B: "Dart",
+        C: "Kotlin",
+        D: "Swift",
+      },
+      answer: "B",
+      explanation: "Flutter sử dụng ngôn ngữ lập trình Dart do Google phát triển.",
+    },
+    {
+      id: 2,
+      question: "In Flutter, everything on the screen is a:",
+      options: {
+        A: "Activity",
+        B: "Fragment",
+        C: "Widget",
+        D: "ViewController",
+      },
+      answer: "C",
+      explanation: "Trong Flutter, mọi thành phần giao diện đều là Widget.",
+    },
+  ],
+  null,
+  2,
+);
+
+const SAMPLE_JSON_OBJECT = JSON.stringify(
+  {
+    title: "Flutter Fundamentals",
+    subject: "Flutter",
+    questions: [
+      {
+        question_text: "Which command creates a new Flutter project?",
+        options: [
+          { option_label: "A", option_content: "flutter init" },
+          { option_label: "B", option_content: "flutter create" },
+          { option_label: "C", option_content: "flutter new" },
+          { option_label: "D", option_content: "flutter start" },
+        ],
+        correct_option_label: "B",
+        explanation: "Lệnh flutter create <tên_dự_án> dùng để khởi tạo project Flutter mới.",
+      },
+    ],
+  },
+  null,
+  2,
+);
+
+function inspectJsonDraft(rawText) {
+  if (!rawText || !rawText.trim()) return null;
+  try {
+    const parsed = JSON.parse(rawText);
+    const list = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.questions)
+      ? parsed.questions
+      : null;
+    if (!list) {
+      return {
+        valid: false,
+        count: 0,
+        message: "JSON cần là mảng câu hỏi [...] hoặc object chứa mảng \"questions\".",
+      };
+    }
+    if (list.length === 0) {
+      return { valid: false, count: 0, message: "Danh sách câu hỏi đang trống." };
+    }
+    if (list.length > 500) {
+      return {
+        valid: false,
+        count: list.length,
+        message: `Phát hiện ${list.length} câu hỏi — vượt giới hạn tối đa 500 câu/bộ đề.`,
+      };
+    }
+    return {
+      valid: true,
+      count: list.length,
+      message: `Đã nhận diện ${list.length} câu hỏi hợp lệ — sẽ tạo thẳng bộ đề không qua Gemini.`,
+    };
+  } catch {
+    return {
+      valid: false,
+      count: 0,
+      message: "Cú pháp JSON chưa hợp lệ (kiểm tra dấu ngoặc hoặc dấu phẩy).",
+    };
+  }
+}
 
 export function GenerateQuizPage() {
   const [searchParams] = useSearchParams();
   const initialDocId = searchParams.get("documentId") || "";
+  const initialMode = searchParams.get("mode") === "json" ? "json" : "document";
   const navigate = useNavigate();
 
   const { documents, loading: loadingDocs, fetchDocuments } = useDocuments();
@@ -39,9 +135,11 @@ export function GenerateQuizPage() {
     submitForPublicApproval,
   } = useQuiz();
 
-  const [inputMode, setInputMode] = useState("document"); // "document" | "json"
+  const [inputMode, setInputMode] = useState(initialMode); // "document" | "json"
   const [jsonText, setJsonText] = useState("");
   const [jsonFileName, setJsonFileName] = useState("");
+  const [showJsonExample, setShowJsonExample] = useState(true);
+  const [sampleTab, setSampleTab] = useState("array"); // "array" | "object"
   const [documentId, setDocumentId] = useState(initialDocId);
   const [title, setTitle] = useState("");
   const [subject, setSubject] = useState("");
@@ -98,6 +196,29 @@ export function GenerateQuizPage() {
     applyDocSuggestions(selectedDoc);
   };
 
+  const jsonDraftInfo = inputMode === "json" ? inspectJsonDraft(jsonText) : null;
+
+  const handleCopySample = async () => {
+    const sample = sampleTab === "array" ? SAMPLE_JSON_ARRAY : SAMPLE_JSON_OBJECT;
+    try {
+      await navigator.clipboard.writeText(sample);
+      toast.success("Đã sao chép JSON mẫu!");
+    } catch {
+      toast.error("Không thể sao chép tự động, bạn có thể bôi đen để copy.");
+    }
+  };
+
+  const handleUseSample = () => {
+    const sample = sampleTab === "array" ? SAMPLE_JSON_ARRAY : SAMPLE_JSON_OBJECT;
+    setJsonText(sample);
+    setJsonFileName("");
+    if (!title) setTitle("Flutter Sample Quiz");
+    if (!subject) setSubject("Flutter");
+    setDefaultExamQuestions(2);
+    setLocalError("");
+    toast.success("Đã điền JSON mẫu vào ô nhập.");
+  };
+
   const handleJsonFileUpload = async (file) => {
     if (!file) return;
     try {
@@ -105,14 +226,17 @@ export function GenerateQuizPage() {
       setJsonText(content);
       setJsonFileName(file.name);
       const parsed = JSON.parse(content);
+      const baseName = file.name.replace(/\.json$/i, "").replace(/[_-]+/g, " ").trim();
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         if (parsed.title && !title) setTitle(String(parsed.title));
+        else if (baseName && !title) setTitle(baseName);
         if (parsed.subject && !subject) setSubject(String(parsed.subject));
         if (parsed.description && !description) setDescription(String(parsed.description));
         if (Array.isArray(parsed.questions)) {
           setDefaultExamQuestions(Math.min(60, parsed.questions.length));
         }
       } else if (Array.isArray(parsed)) {
+        if (baseName && !title) setTitle(baseName);
         setDefaultExamQuestions(Math.min(60, parsed.length));
       }
       setLocalError("");
@@ -263,7 +387,7 @@ export function GenerateQuizPage() {
               <CardDescription className="text-xs mt-0.5">
                 {inputMode === "json"
                   ? "Nhập trực tiếp JSON câu hỏi để tạo bộ đề ngay lập tức mà không cần gọi Gemini AI."
-                  : "Hệ thống tự động chia nhỏ tài liệu lớn và kiểm định JSON đáp án trước khi lưu vào database."}
+                  : "Tạo đề trực tiếp từ dữ liệu JSON / Ngân hàng câu hỏi đã trích xuất của tài liệu (0 lượt gọi Gemini, tiết kiệm token)."}
               </CardDescription>
             </div>
             <div className="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-50">
@@ -324,9 +448,97 @@ export function GenerateQuizPage() {
                     rows={8}
                     value={jsonText}
                     onChange={(e) => setJsonText(e.target.value)}
-                    placeholder={`{\n  "title": "Đề thi mẫu",\n  "questions": [\n    {\n      "question_text": "1 + 1 = ?",\n      "question_type": "multiple_choice",\n      "difficulty": "easy",\n      "options": [\n        { "option_label": "A", "option_content": "1" },\n        { "option_label": "B", "option_content": "2" }\n      ],\n      "correct_option_label": "B",\n      "explanation": "1 + 1 = 2"\n    }\n  ]\n}`}
+                    placeholder={SAMPLE_JSON_ARRAY}
                     className="font-mono text-xs"
                   />
+
+                  {jsonDraftInfo && (
+                    <div
+                      className={`px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-2 border ${
+                        jsonDraftInfo.valid
+                          ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                          : "bg-amber-50 border-amber-200 text-amber-800"
+                      }`}
+                    >
+                      {jsonDraftInfo.valid ? (
+                        <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
+                      ) : (
+                        <AlertCircle className="size-4 shrink-0 text-amber-600" />
+                      )}
+                      <span>{jsonDraftInfo.message}</span>
+                    </div>
+                  )}
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowJsonExample((prev) => !prev)}
+                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-800 hover:text-primary"
+                      >
+                        <Code2 className="size-3.5 text-primary" />
+                        <span>
+                          Định dạng JSON được hỗ trợ ({showJsonExample ? "Ẩn ví dụ" : "Xem ví dụ"})
+                        </span>
+                      </button>
+
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setSampleTab("array")}
+                          className={`px-2 py-1 rounded text-[11px] font-semibold border transition-colors ${
+                            sampleTab === "array"
+                              ? "bg-[#333836] text-[#B0FDE0] border-[#333836]"
+                              : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                          }`}
+                        >
+                          Kiểu mảng (question / options A-D / answer)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSampleTab("object")}
+                          className={`px-2 py-1 rounded text-[11px] font-semibold border transition-colors ${
+                            sampleTab === "object"
+                              ? "bg-[#333836] text-[#B0FDE0] border-[#333836]"
+                              : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                          }`}
+                        >
+                          Kiểu Object (title + questions)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCopySample}
+                          className="px-2 py-1 rounded text-[11px] font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 inline-flex items-center gap-1"
+                        >
+                          <Copy className="size-3" />
+                          <span>Copy mẫu</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleUseSample}
+                          className="px-2 py-1 rounded text-[11px] font-semibold bg-[#B0FDE0] hover:bg-[#93f5d0] text-[#333836]"
+                        >
+                          Dùng mẫu này
+                        </button>
+                      </div>
+                    </div>
+
+                    {showJsonExample && (
+                      <div className="space-y-2">
+                        <p className="text-[11px] text-slate-600 leading-relaxed">
+                          Hỗ trợ cả 2 kiểu JSON: mảng câu hỏi trực tiếp <code>[...]</code> hoặc object{" "}
+                          <code>{"{ title, questions: [...] }"}</code>. Các trường linh hoạt:{" "}
+                          <code>question</code> / <code>question_text</code>,{" "}
+                          <code>options</code> dạng object <code>{"{ A, B, C, D }"}</code> hoặc mảng,{" "}
+                          <code>answer</code> / <code>correct_option_label</code>, và{" "}
+                          <code>explanation</code> (tùy chọn).
+                        </p>
+                        <pre className="p-3 rounded-lg bg-slate-900 text-slate-100 text-[11px] font-mono overflow-x-auto max-h-52 leading-relaxed">
+                          {sampleTab === "array" ? SAMPLE_JSON_ARRAY : SAMPLE_JSON_OBJECT}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="md:col-span-2 space-y-1.5">
@@ -575,24 +787,23 @@ export function GenerateQuizPage() {
             {generating && (
               <AiProgressCard
                 active={generating}
-                title={`Gemini AI đang tạo ${questionCount} câu hỏi`}
+                title={
+                  inputMode === "json"
+                    ? "Đang lưu bộ đề trực tiếp từ JSON (0 Gemini calls)"
+                    : `Đang tạo bộ đề ${questionCount} câu từ Ngân hàng JSON`
+                }
                 currentMessage={
                   generateProgress?.message ||
-                  "Đang đọc ngữ cảnh tài liệu, biên soạn câu hỏi, đáp án & giải thích chi tiết..."
+                  "Đang lấy câu hỏi từ dữ liệu JSON đã lưu và tạo bộ đề (không gọi Gemini)..."
                 }
                 basePercent={generateProgress?.percent ?? 10}
                 currentStepIndex={generateProgress?.step === "completed" ? 4 : 1}
-                estimatedSeconds={Math.max(12, Math.round(Number(questionCount) * 0.7 + 6))}
+                estimatedSeconds={inputMode === "json" ? 4 : 5}
                 steps={[
-                  { id: "context", label: "Đọc tài liệu" },
-                  {
-                    id: "generate",
-                    label: generateProgress?.totalBatches > 1
-                      ? `Đợt ${Math.min((generateProgress.batchIndex ?? 0) + 1, generateProgress.totalBatches)}/${generateProgress.totalBatches}`
-                      : `Sinh ${questionCount} câu AI`,
-                  },
-                  { id: "validate", label: "Kiểm tra JSON" },
-                  { id: "save", label: "Lưu ngân hàng đề" },
+                  { id: "context", label: "Đọc JSON" },
+                  { id: "generate", label: "Kiểm định cấu trúc" },
+                  { id: "validate", label: "Chuẩn hóa đáp án" },
+                  { id: "save", label: "Lưu bộ đề" },
                 ]}
               />
             )}
@@ -603,7 +814,7 @@ export function GenerateQuizPage() {
                 disabled={
                   generating ||
                   (inputMode === "document" && documents.length === 0) ||
-                  (inputMode === "json" && !jsonText.trim())
+                  (inputMode === "json" && (!jsonText.trim() || jsonDraftInfo?.valid === false))
                 }
                 className="h-10 px-6 bg-[#B0FDE0] hover:bg-[#93f5d0] text-[#333836] font-semibold"
               >
@@ -613,7 +824,7 @@ export function GenerateQuizPage() {
                     <span>
                       {inputMode === "json"
                         ? "Đang lưu bộ đề từ JSON..."
-                        : `Gemini AI đang biên soạn ${questionCount} câu...`}
+                        : `Đang tạo bộ đề ${questionCount} câu...`}
                     </span>
                   </>
                 ) : (
@@ -623,7 +834,7 @@ export function GenerateQuizPage() {
                     ) : (
                       <Sparkles className="size-4" />
                     )}
-                    <span>{inputMode === "json" ? "Tạo đề ngay từ JSON" : "Generate Quiz"}</span>
+                    <span>{inputMode === "json" ? "Tạo đề ngay từ JSON" : "Tạo đề từ dữ liệu JSON"}</span>
                   </>
                 )}
               </Button>

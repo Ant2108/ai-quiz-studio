@@ -192,10 +192,18 @@ export function validateGeneratedQuizPayload(
     }
 
     const questionText =
-      typeof q.question_text === "string" ? q.question_text.trim() : "";
+      typeof q.question_text === "string"
+        ? q.question_text.trim()
+        : typeof q.question === "string"
+        ? q.question.trim()
+        : typeof q.prompt === "string"
+        ? q.prompt.trim()
+        : typeof q.text === "string"
+        ? q.text.trim()
+        : "";
     if (!questionText) {
       throw new AppError(
-        `Câu hỏi thứ ${i + 1} bị thiếu nội dung question_text.`,
+        `Câu hỏi thứ ${i + 1} bị thiếu nội dung question_text (hoặc question).`,
         422,
         "AI_MISSING_QUESTION_TEXT",
       );
@@ -204,6 +212,8 @@ export function validateGeneratedQuizPayload(
     const rawType =
       typeof q.question_type === "string"
         ? q.question_type.toLowerCase().trim()
+        : typeof q.type === "string"
+        ? q.type.toLowerCase().trim()
         : "multiple_choice";
     const questionType: "multiple_choice" | "true_false" =
       rawType === "true_false" ? "true_false" : "multiple_choice";
@@ -217,7 +227,20 @@ export function validateGeneratedQuizPayload(
         ? rawDiff
         : fallbackDifficulty;
 
-    const rawOptions = Array.isArray(q.options) ? q.options : [];
+    // Support both Array format ([{ option_label, option_content }] or ["..."])
+    // AND Object/Map format ({ "A": "...", "B": "...", "C": "...", "D": "..." })
+    let rawOptions: unknown[] = [];
+    if (Array.isArray(q.options)) {
+      rawOptions = q.options;
+    } else if (q.options && typeof q.options === "object") {
+      rawOptions = Object.entries(q.options as Record<string, unknown>).map(
+        ([label, content]) => ({
+          option_label: label,
+          option_content: typeof content === "string" ? content : String(content ?? ""),
+        }),
+      );
+    }
+
     if (rawOptions.length < 2) {
       throw new AppError(
         `Câu hỏi thứ ${i + 1} phải có ít nhất 2 phương án lựa chọn.`,
@@ -231,8 +254,15 @@ export function validateGeneratedQuizPayload(
     const defaultLabels = ["A", "B", "C", "D", "E", "F"];
 
     for (let j = 0; j < rawOptions.length; j++) {
-      const opt = rawOptions[j] as Record<string, unknown>;
-      if (!opt || typeof opt !== "object") {
+      const rawOpt = rawOptions[j];
+      const opt: Record<string, unknown> | null =
+        typeof rawOpt === "string"
+          ? { option_label: defaultLabels[j] || String.fromCharCode(65 + j), option_content: rawOpt }
+          : rawOpt && typeof rawOpt === "object"
+          ? (rawOpt as Record<string, unknown>)
+          : null;
+
+      if (!opt) {
         throw new AppError(
           `Phương án thứ ${j + 1} của câu hỏi ${i + 1} không hợp lệ.`,
           422,
@@ -240,19 +270,27 @@ export function validateGeneratedQuizPayload(
         );
       }
 
-      const rawLabel =
+      const rawLabelCandidate =
         typeof opt.option_label === "string" && opt.option_label.trim()
           ? opt.option_label.trim().toUpperCase()
+          : typeof opt.label === "string" && opt.label.trim()
+          ? opt.label.trim().toUpperCase()
+          : typeof opt.key === "string" && opt.key.trim()
+          ? opt.key.trim().toUpperCase()
           : defaultLabels[j] || String.fromCharCode(65 + j);
 
       // Normalize labels like "A." or "A)" to "A"
-      const cleanLabel = rawLabel.replace(/[^A-Z0-9]/g, "") || defaultLabels[j];
+      const cleanLabel = rawLabelCandidate.replace(/[^A-Z0-9]/g, "") || defaultLabels[j];
 
       const optionContent =
         typeof opt.option_content === "string"
           ? opt.option_content.trim()
+          : typeof opt.content === "string"
+          ? opt.content.trim()
           : typeof opt.text === "string"
           ? opt.text.trim()
+          : typeof opt.value === "string"
+          ? opt.value.trim()
           : "";
 
       if (!optionContent) {
@@ -297,10 +335,23 @@ export function validateGeneratedQuizPayload(
       continue;
     }
 
-    const rawCorrectLabel =
+    const rawCorrectSource =
       typeof q.correct_option_label === "string"
-        ? q.correct_option_label.trim().toUpperCase().replace(/[^A-Z0-9]/g, "")
+        ? q.correct_option_label
+        : typeof q.answer === "string"
+        ? q.answer
+        : typeof q.correct_answer === "string"
+        ? q.correct_answer
+        : typeof q.correctAnswer === "string"
+        ? q.correctAnswer
+        : typeof q.correct === "string"
+        ? q.correct
         : "";
+
+    const rawCorrectLabel = rawCorrectSource
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
 
     if (!rawCorrectLabel || !seenLabels.has(rawCorrectLabel)) {
       if (rawQuestions.length === 1) {

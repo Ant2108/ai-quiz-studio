@@ -747,12 +747,16 @@ export async function analyzeDocumentWithGemini(params: {
 
   const systemInstruction =
     "Bạn là chuyên gia phân tích tài liệu giáo dục và OCR chính xác. " +
-    "Chỉ trích xuất và tóm tắt thông tin có thật trong tài liệu nguồn, tuyệt đối không bịa thêm kiến thức ngoài tài liệu. " +
-    "Trả về duy nhất 1 JSON object hợp lệ theo đúng cấu trúc yêu cầu.";
+    "NGUYÊN TẮC BẮT BUỘC:\n" +
+    "1. Chỉ trích xuất và tóm tắt thông tin có thật trong tài liệu nguồn, tuyệt đối không bịa thêm kiến thức ngoài tài liệu.\n" +
+    "2. GIỮ NGUYÊN NGÔN NGỮ GỐC CỦA TÀI LIỆU cho toàn bộ câu hỏi (question_text) và các phương án trả lời (option_content). " +
+    "TUYỆT ĐỐI KHÔNG tự động dịch câu hỏi hoặc đáp án sang tiếng Việt nếu tài liệu gốc là tiếng Anh hoặc ngôn ngữ khác.\n" +
+    "3. Riêng trường explanation (giải thích đáp án) viết ngắn gọn, dễ hiểu bằng tiếng Việt (giữ nguyên các thuật ngữ chuyên ngành, tên hàm/class/code gốc).\n" +
+    "4. Trả về duy nhất 1 JSON object hợp lệ theo đúng cấu trúc yêu cầu.";
 
   const analysisPrompt = `Hãy đọc tài liệu "${fileName}" và trả về JSON có cấu trúc theo mẫu sau:
 {
-  "extracted_text": "Toàn bộ nội dung văn bản trích xuất / OCR từ tài liệu (giữ nguyên các định nghĩa, công thức LaTeX nếu có, đánh dấu [Trang X] nếu xác định được trang)",
+  "extracted_text": "Toàn bộ nội dung văn bản trích xuất / OCR từ tài liệu (giữ nguyên ngôn ngữ gốc, các định nghĩa, công thức LaTeX nếu có, đánh dấu [Trang X] nếu xác định được trang)",
   "estimated_pages": 1,
   "title_suggestion": "Tên bộ đề gợi ý ngắn gọn sát nội dung",
   "subject_suggestion": "Môn học hoặc lĩnh vực chính",
@@ -762,23 +766,25 @@ export async function analyzeDocumentWithGemini(params: {
   "recommended_question_count": 20,
   "questions": [
     {
-      "question_text": "Câu hỏi trắc nghiệm bám sát nội dung tài liệu?",
+      "question_text": "Câu hỏi trắc nghiệm giữ nguyên ngôn ngữ gốc của tài liệu?",
       "question_type": "multiple_choice",
       "difficulty": "medium",
       "options": [
-        { "option_label": "A", "option_content": "Phương án A" },
-        { "option_label": "B", "option_content": "Phương án B" },
-        { "option_label": "C", "option_content": "Phương án C" },
-        { "option_label": "D", "option_content": "Phương án D" }
+        { "option_label": "A", "option_content": "Option A in original document language" },
+        { "option_label": "B", "option_content": "Option B in original document language" },
+        { "option_label": "C", "option_content": "Option C in original document language" },
+        { "option_label": "D", "option_content": "Option D in original document language" }
       ],
       "correct_option_label": "A",
-      "explanation": "Giải thích ngắn gọn theo tài liệu nguồn.",
+      "explanation": "Giải thích ngắn gọn bằng tiếng Việt (giữ nguyên thuật ngữ gốc) vì sao đáp án đúng theo tài liệu nguồn.",
       "formula_latex": null,
       "source_page": 1
     }
   ]
 }
-Lưu ý: Tạo tối đa 20 câu hỏi chất lượng cao (đa dạng easy/medium/hard, chỉ dựa trên nội dung tài liệu) trong mảng "questions" để lưu vào Ngân hàng câu hỏi.`;
+Lưu ý quan trọng:
+- Nếu tài liệu gốc đã chứa sẵn danh sách câu hỏi trắc nghiệm, hãy trích xuất ĐẦY ĐỦ các câu hỏi đó vào mảng "questions" và GIỮ NGUYÊN ngôn ngữ gốc của đề và các phương án.
+- Nếu tài liệu là bài giảng/giáo trình, hãy biên soạn bộ câu hỏi chất lượng cao (đa dạng easy/medium/hard, chỉ dựa trên tài liệu nguồn, giữ nguyên ngôn ngữ gốc cho question_text và option_content; riêng explanation giải thích bằng tiếng Việt) vào mảng "questions" để hệ thống lưu JSON và tạo đề trực tiếp không cần gọi AI lần nữa.`;
 
   const parts: Array<Record<string, unknown>> = [];
   let uploadedGeminiFileName: string | null = null;
@@ -965,10 +971,13 @@ export async function generateQuizWithGemini(params: {
     "Bạn là chuyên gia biên soạn đề thi trắc nghiệm học thuật chuẩn xác. " +
     "NGUYÊN TẮC BẮT BUỘC:\n" +
     "1. Chỉ tạo câu hỏi và đáp án dựa trên nội dung tài liệu nguồn được cung cấp. Tuyệt đối KHÔNG tự bịa thông tin ngoài tài liệu.\n" +
-    "2. Mỗi câu hỏi multiple_choice phải có đúng 4 phương án A, B, C, D với option_content đầy đủ (tuyệt đối không để trống). Mỗi câu hỏi true_false phải có đúng 2 phương án A (Đúng) và B (Sai).\n" +
-    "3. Trường correct_option_label phải khớp chính xác với một trong các option_label của câu hỏi đó.\n" +
-    "4. Nếu câu hỏi có công thức toán/lý/hóa, biểu diễn trong trường formula_latex ở dạng LaTeX chuẩn.\n" +
-    "5. Trả về duy nhất JSON hợp lệ theo schema yêu cầu.";
+    "2. GIỮ NGUYÊN NGÔN NGỮ GỐC CỦA TÀI LIỆU NGUỒN cho toàn bộ câu hỏi (question_text) và các phương án (option_content). " +
+    "TUYỆT ĐỐI KHÔNG tự động dịch câu hỏi hoặc đáp án sang tiếng Việt nếu tài liệu là tiếng Anh hoặc ngôn ngữ khác.\n" +
+    "3. Riêng trường explanation (giải thích đáp án) có thể viết ngắn gọn, dễ hiểu bằng tiếng Việt (giữ nguyên thuật ngữ chuyên ngành và mã nguồn gốc).\n" +
+    "4. Mỗi câu hỏi multiple_choice phải có đúng 4 phương án A, B, C, D với option_content đầy đủ (tuyệt đối không để trống). Mỗi câu hỏi true_false phải có đúng 2 phương án A (True/Đúng theo ngôn ngữ gốc) và B (False/Sai theo ngôn ngữ gốc).\n" +
+    "5. Trường correct_option_label phải khớp chính xác với một trong các option_label của câu hỏi đó.\n" +
+    "6. Nếu câu hỏi có công thức toán/lý/hóa, biểu diễn trong trường formula_latex ở dạng LaTeX chuẩn.\n" +
+    "7. Trả về duy nhất JSON hợp lệ theo schema yêu cầu.";
 
   const allValidatedQuestions: ValidatedGeneratedQuestion[] = [];
   let remaining = questionCount;
@@ -993,23 +1002,24 @@ Thông tin cấu hình:
 - Độ khó mục tiêu: ${difficulty}
 - Các loại câu hỏi được phép sử dụng: ${questionTypes.join(", ")}
 - Phần ${startChunkIndex + batchIdx + 1}: tập trung tạo các câu hỏi khác biệt, không trùng lặp với phần khác.
+- Ngôn ngữ: GIỮ NGUYÊN ngôn ngữ gốc của tài liệu cho "question_text" và "option_content" (không tự dịch sang tiếng Việt). Riêng "explanation" giải thích ngắn gọn bằng tiếng Việt (giữ nguyên thuật ngữ gốc).
 
 Cấu trúc JSON bắt buộc:
 {
   "title": "${title.replace(/"/g, '\\"')}",
   "questions": [
     {
-      "question_text": "Nội dung câu hỏi rõ ràng, đầy đủ?",
+      "question_text": "Question in the exact original language of the source document?",
       "question_type": "multiple_choice",
       "difficulty": "${difficulty}",
       "options": [
-        { "option_label": "A", "option_content": "Nội dung lựa chọn A" },
-        { "option_label": "B", "option_content": "Nội dung lựa chọn B" },
-        { "option_label": "C", "option_content": "Nội dung lựa chọn C" },
-        { "option_label": "D", "option_content": "Nội dung lựa chọn D" }
+        { "option_label": "A", "option_content": "Option A in original language" },
+        { "option_label": "B", "option_content": "Option B in original language" },
+        { "option_label": "C", "option_content": "Option C in original language" },
+        { "option_label": "D", "option_content": "Option D in original language" }
       ],
       "correct_option_label": "A",
-      "explanation": "Giải thích ngắn gọn 1-2 câu vì sao đáp án đúng theo tài liệu nguồn.",
+      "explanation": "Giải thích ngắn gọn 1-2 câu bằng tiếng Việt vì sao đáp án đúng theo tài liệu nguồn.",
       "formula_latex": null,
       "source_page": 1
     }

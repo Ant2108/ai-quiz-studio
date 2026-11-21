@@ -264,13 +264,14 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // 4. Ensure document has extracted_text or extracted_data (auto-process if not yet extracted)
+    // 4. Ensure document has extracted_data / Question Bank (Gemini is ONLY called during process-document,
+    //    NOT during generate-quiz, unless force_ai=true is explicitly requested)
     let workingDoc = doc;
     const hasExtractedText = Boolean((doc.extracted_text || "").trim());
     const hasBankQuestions =
       Array.isArray(doc.extracted_data?.questions) && doc.extracted_data.questions.length > 0;
 
-    if (!hasExtractedText && !hasBankQuestions) {
+    if (forceAi && !hasExtractedText && !hasBankQuestions) {
       const { normalizedExt, normalizedMime } = validateDocumentFile({
         fileName: doc.file_name,
         fileType: doc.file_type,

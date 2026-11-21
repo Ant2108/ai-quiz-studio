@@ -217,6 +217,19 @@ export function DocumentsPage() {
               )}
             </div>
 
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 rounded-lg bg-slate-50 border border-slate-200/80 text-xs text-slate-600">
+              <span>
+                Chỉ gọi Gemini AI <strong>1 lần duy nhất</strong> khi chuyển đổi PDF/DOCX/TXT/Ảnh sang JSON. File{" "}
+                <code>.json</code> sẽ được nhập thẳng không qua Gemini.
+              </span>
+              <Link
+                to="/generate?mode=json"
+                className="font-semibold text-primary hover:underline shrink-0"
+              >
+                Xem định dạng JSON mẫu →
+              </Link>
+            </div>
+
             {/* Processing & AI OCR Progress */}
             {(() => {
               const reprocessingDoc = reprocessingId

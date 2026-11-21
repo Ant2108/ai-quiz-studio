@@ -595,6 +595,7 @@ test("Scenario 9: Ensures only one final quiz record is saved and rolls back par
       documentId: "doc-uuid-1",
       title: "Multi Batch Quiz",
       questionCount: 40,
+      forceAi: true,
       onProgress: (p) => progressSuccess.push(p),
     });
 
@@ -656,6 +657,7 @@ test("Scenario 9: Ensures only one final quiz record is saved and rolls back par
           documentId: "doc-uuid-2",
           title: "Partial Fail Quiz",
           questionCount: 40,
+          forceAi: true,
         }),
       /All Gemini models exhausted/,
     );
@@ -1002,4 +1004,126 @@ test("Direct JSON Import: Bypasses Gemini completely in both processOrRecoverDoc
     supabase.auth.getSession = originalGetSession;
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Flexible JSON Schema: Supports { id, question, options: { A, B, C, D }, answer, explanation } including 2/3/4 options", async () => {
+  const { validateGeneratedQuizPayload } = await import("../supabase/functions/_shared/validation.ts");
+
+  const flexibleArray = [
+    {
+      id: 1,
+      question: "Which language does Flutter use?",
+      options: { A: "Java", B: "Dart", C: "Kotlin", D: "Swift" },
+      answer: "B",
+      explanation: "Flutter sử dụng Dart.",
+    },
+    {
+      id: 2,
+      question: "Pick the 3-option item:",
+      options: { A: "First", B: "Second", C: "Third" },
+      answer: "C",
+      explanation: "Đáp án là C.",
+    },
+    {
+      id: 3,
+      question: "StatelessWidget is immutable.",
+      options: { A: "True", B: "False" },
+      answer: "A",
+      explanation: "StatelessWidget không thay đổi trạng thái nội bộ.",
+    },
+  ];
+
+  const validated = validateGeneratedQuizPayload(flexibleArray, "Flutter Questions", "medium");
+  assert.equal(validated.title, "Flutter Questions");
+  assert.equal(validated.questions.length, 3);
+  assert.equal(validated.questions[0].question_text, "Which language does Flutter use?");
+  assert.equal(validated.questions[0].options.length, 4);
+  assert.equal(validated.questions[0].correct_option_label, "B");
+  assert.equal(validated.questions[1].options.length, 3);
+  assert.equal(validated.questions[2].question_type, "multiple_choice");
+  assert.equal(validated.questions[2].options.length, 2);
+});
+
+test("Strict Zero-Gemini Quiz Generation: Never calls Gemini in generateQuizDatabaseFirst unless forceAi=true", async () => {
+  let geminiCalls = 0;
+
+  await assert.rejects(
+    () =>
+      generateQuizDatabaseFirst({
+        doc: {
+          id: "doc-empty-bank",
+          user_id: "user-1",
+          file_name: "legacy.pdf",
+          file_path: "user-1/legacy.pdf",
+          file_type: "pdf",
+          extracted_text: "Some legacy extracted text.",
+          question_bank_synced: false,
+          extracted_data: null,
+        },
+        actorUserId: "user-1",
+        existingQuizSetId: null,
+        title: "Legacy Quiz",
+        description: "Test",
+        subject: "CS",
+        topic: null,
+        difficulty: "medium",
+        questionCount: 20,
+        questionTypes: ["multiple_choice"],
+        defaultExamQuestions: 20,
+        defaultExamDuration: 30,
+        forceAi: false,
+        repo: {
+          async syncFromExtractedData() {},
+          async createQuizFromQuestionBank() {
+            return { quiz_set_id: "", question_count: 0, questions: [], source: "database_empty" };
+          },
+          async createOrAppendQuizFromAi() {
+            throw new Error("MUST NOT call AI save path when forceAi is false");
+          },
+        },
+        geminiDeps: {
+          apiKeyOverride: "fake-key",
+          fetchImpl: async () => {
+            geminiCalls++;
+            throw new Error("MUST NOT call Gemini during generate-quiz when forceAi is false");
+          },
+        },
+      }),
+    (err) => err instanceof AppError && err.code === "DOCUMENT_QUESTION_BANK_EMPTY" && err.statusCode === 400,
+  );
+
+  assert.equal(geminiCalls, 0);
+});
+
+test("Language Preservation: Gemini prompts instruct keeping source language for questions/options and Vietnamese for explanations", async () => {
+  let capturedAnalyzeBody = null;
+  await analyzeDocumentWithGemini({
+    fileBytes: new TextEncoder().encode("Flutter is an open-source UI toolkit created by Google using Dart."),
+    fileName: "flutter_slides.txt",
+    mimeType: "text/plain",
+    ext: "txt",
+    deps: {
+      apiKeyOverride: "fake-key",
+      sleepImpl: async () => {},
+      fetchImpl: async (_url, init) => {
+        capturedAnalyzeBody = JSON.parse(String(init?.body || "{}"));
+        return makeGeminiSuccessPayload({
+          extracted_text: "PROVIDED_IN_TEXT",
+          estimated_pages: 1,
+          title_suggestion: "Flutter Slides",
+          subject_suggestion: "Flutter",
+          topics: ["Widgets"],
+          summary: "Flutter overview",
+          key_concepts: ["Dart"],
+          recommended_question_count: 5,
+          questions: makeSampleQuizJson("What language does Flutter use?").questions,
+        });
+      },
+    },
+  });
+
+  const sysText = capturedAnalyzeBody?.systemInstruction?.parts?.[0]?.text || "";
+  assert.ok(sysText.includes("GIỮ NGUYÊN NGÔN NGỮ GỐC"));
+  assert.ok(sysText.includes("TUYỆT ĐỐI KHÔNG tự động dịch"));
+  assert.ok(sysText.includes("explanation"));
 });

@@ -31,7 +31,9 @@ async function fetchCreatorProfilesMap(userIds) {
 
 export const quizService = {
   /**
-   * Calls the `generate-quiz` Edge Function to generate a quiz set from a document via Gemini AI.
+   * Calls the `generate-quiz` Edge Function to create a quiz set from a document's stored JSON / Question Bank
+   * (0 Gemini calls by default, single atomic request up to 500 questions).
+   * Only runs multi-batch Gemini generation when `forceAi: true` is explicitly passed.
    */
   async generateQuizFromDocument({
     documentId,
@@ -44,10 +46,11 @@ export const quizService = {
     questionTypes = ["multiple_choice"],
     defaultExamQuestions = 60,
     defaultExamDuration = 60,
+    forceAi = false,
     onProgress = () => {},
   }) {
     const total = Math.max(1, Math.min(500, Number(questionCount) || 20));
-    const BATCH_SIZE = 20;
+    const BATCH_SIZE = forceAi ? 20 : total;
     const batchCounts = [];
     let rem = total;
     while (rem > 0) {
@@ -59,8 +62,10 @@ export const quizService = {
     let quizSet = null;
     let allPreviewQuestions = [];
     let completedCount = 0;
-    let activeModelId = "gemini-3.8-flash";
-    let activeModelName = "Gemini 3.8 Flash";
+    let activeModelId = forceAi ? "gemini-3.8-flash" : "database-bank";
+    let activeModelName = forceAi
+      ? "Gemini 3.8 Flash"
+      : "Ngân hàng câu hỏi JSON (0 Gemini calls)";
     let lastAiMeta = null;
 
     try {
@@ -68,12 +73,13 @@ export const quizService = {
         const batchCount = batchCounts[i];
         const basePercent = Math.round((completedCount / total) * 90) + 5;
 
-        const statusMessage =
-          lastAiMeta?.fallback_triggered
-            ? `Gemini 3.8 Flash đã hết quota. Đang chuyển sang ${activeModelName}... (${completedCount}/${total} câu)`
-            : batchCounts.length > 1
-            ? `Đang xử lý bằng ${activeModelName} (Đợt ${i + 1}/${batchCounts.length}: ${completedCount}/${total} câu)...`
-            : `Đang xử lý bằng ${activeModelName}...`;
+        const statusMessage = !forceAi
+          ? `Đang tạo đề trực tiếp từ dữ liệu JSON / Ngân hàng câu hỏi (${total} câu — không gọi Gemini)...`
+          : lastAiMeta?.fallback_triggered
+          ? `Gemini 3.8 Flash đã hết quota. Đang chuyển sang ${activeModelName}... (${completedCount}/${total} câu)`
+          : batchCounts.length > 1
+          ? `Đang xử lý bằng ${activeModelName} (Đợt ${i + 1}/${batchCounts.length}: ${completedCount}/${total} câu)...`
+          : `Đang xử lý bằng ${activeModelName}...`;
 
         onProgress({
           step: "generating",
@@ -97,7 +103,8 @@ export const quizService = {
               document_id: documentId,
               quiz_set_id: quizSet?.id || null,
               chunk_index: i,
-              preferred_model: i > 0 ? activeModelId : null,
+              preferred_model: forceAi && i > 0 ? activeModelId : null,
+              force_ai: forceAi,
               title,
               description,
               subject,
@@ -112,11 +119,12 @@ export const quizService = {
           } catch (err) {
             const msg = err?.message || "";
             const isRateLimit =
-              err?.status === 429 ||
-              msg.includes("429") ||
-              msg.includes("Quota") ||
-              msg.includes("Rate Limit") ||
-              msg.includes("quota");
+              forceAi &&
+              (err?.status === 429 ||
+                msg.includes("429") ||
+                msg.includes("Quota") ||
+                msg.includes("Rate Limit") ||
+                msg.includes("quota"));
 
             if (isRateLimit && attempt < 2) {
               onProgress({

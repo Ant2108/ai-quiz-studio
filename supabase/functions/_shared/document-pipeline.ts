@@ -343,10 +343,12 @@ export interface QuizRepoAdapter {
 }
 
 /**
- * Generates a quiz set Database-first:
+ * Generates a quiz set Database-only by default (0 Gemini calls):
  *   1. If `doc.extracted_data.questions` exists and `question_bank_synced` is false, syncs it first (0 Gemini calls).
- *   2. Attempts `rpc_create_quiz_from_question_bank` (0 Gemini calls).
- *   3. Falls back to Gemini AI only if the normalized bank is empty (legacy documents) or `forceAi` is true.
+ *   2. Calls `rpc_create_quiz_from_question_bank` directly from stored JSON / Normalized Question Bank (0 Gemini calls).
+ *   3. NEVER calls Gemini silently during quiz generation. If the bank is empty and `forceAi` is false,
+ *      throws DOCUMENT_QUESTION_BANK_EMPTY so Gemini is only invoked during document conversion (`process-document`).
+ *   4. Only calls `generateQuizWithGemini` when `forceAi === true` is explicitly requested.
  */
 export async function generateQuizDatabaseFirst(params: {
   doc: DocumentRecord;
@@ -435,18 +437,25 @@ export async function generateQuizDatabaseFirst(params: {
         source: "database_bank",
         aiMeta: {
           model_id: "database-bank",
-          model_name: "Normalized Question Bank (Database)",
+          model_name: "Normalized Question Bank (Database - 0 Gemini calls)",
           fallback_triggered: false,
           status_messages: [
-            "Đang tạo đề trực tiếp từ Ngân hàng câu hỏi Database (0 Gemini calls)...",
+            "Đang tạo đề trực tiếp từ dữ liệu JSON / Ngân hàng câu hỏi Database (không gọi Gemini)...",
           ],
           attempts: [],
         },
       };
     }
+
+    // Strict Database-only quiz generation: never burn Gemini tokens/quota during generate-quiz
+    throw new AppError(
+      "Tài liệu này chưa có dữ liệu câu hỏi JSON trong Ngân hàng câu hỏi. Vui lòng vào mục Tài liệu và nhấn 'Thử lại' để chuyển file sang JSON 1 lần duy nhất, sau đó tạo đề trực tiếp không tốn token Gemini.",
+      400,
+      "DOCUMENT_QUESTION_BANK_EMPTY",
+    );
   }
 
-  // Fallback to Gemini AI only if document has no normalized bank questions yet
+  // Explicit AI generation path (only reached when forceAi === true)
   const documentText = (doc.extracted_text || doc.extracted_data?.extracted_text || "").trim();
   if (!documentText) {
     throw new AppError(
