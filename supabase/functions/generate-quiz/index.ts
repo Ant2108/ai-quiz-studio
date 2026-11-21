@@ -9,7 +9,7 @@
 //   "subject": "Java",
 //   "topic"?: string,
 //   "difficulty": "medium",
-//   "question_count": 120,
+//   "question_count": 500,
 //   "question_types": ["multiple_choice", "true_false"],
 //   "default_exam_questions"?: number,
 //   "default_exam_duration"?: number
@@ -87,9 +87,9 @@ Deno.serve(async (req: Request) => {
     const difficulty = rawDifficulty as "easy" | "medium" | "hard";
 
     const questionCount = Number(payload.question_count ?? 10);
-    if (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > 120) {
+    if (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > 500) {
       throw new AppError(
-        "Số lượng câu hỏi (question_count) phải là số nguyên từ 1 đến 120.",
+        "Số lượng câu hỏi (question_count) phải là số nguyên từ 1 đến 500.",
         400,
         "INVALID_QUESTION_COUNT",
       );

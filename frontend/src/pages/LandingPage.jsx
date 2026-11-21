@@ -37,7 +37,7 @@ const FEATURES = [
   },
   {
     icon: Sparkles,
-    title: "Sinh bộ đề tự động đến 120 câu",
+    title: "Sinh bộ đề tự động đến 500 câu",
     description:
       "Tùy chọn số câu hỏi, độ khó (Dễ / Trung bình / Khó) và dạng câu hỏi Trắc nghiệm 4 lựa chọn hoặc Đúng/Sai.",
     tone: "bg-[#B0FDE0]/35 text-[#333836]",

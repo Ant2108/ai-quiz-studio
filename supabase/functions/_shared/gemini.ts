@@ -888,7 +888,7 @@ Lưu ý: Tạo tối đa 20 câu hỏi chất lượng cao (đa dạng easy/medi
     recommended_question_count:
       typeof parsed.recommended_question_count === "number" &&
         parsed.recommended_question_count > 0
-        ? Math.min(120, Math.max(5, Math.round(parsed.recommended_question_count)))
+        ? Math.min(500, Math.max(5, Math.round(parsed.recommended_question_count)))
         : 20,
   };
 

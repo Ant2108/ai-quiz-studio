@@ -46,7 +46,7 @@ export const quizService = {
     defaultExamDuration = 60,
     onProgress = () => {},
   }) {
-    const total = Math.max(1, Math.min(120, Number(questionCount) || 20));
+    const total = Math.max(1, Math.min(500, Number(questionCount) || 20));
     const BATCH_SIZE = 20;
     const batchCounts = [];
     let rem = total;

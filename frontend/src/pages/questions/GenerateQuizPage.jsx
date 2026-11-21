@@ -110,8 +110,8 @@ export function GenerateQuizPage() {
       return;
     }
 
-    if (questionCount < 1 || questionCount > 120) {
-      setLocalError("Số lượng câu hỏi phải từ 1 đến 120 câu.");
+    if (questionCount < 1 || questionCount > 500) {
+      setLocalError("Số lượng câu hỏi phải từ 1 đến 500 câu.");
       return;
     }
 
@@ -282,13 +282,13 @@ export function GenerateQuizPage() {
 
               {/* Question Count */}
               <div className="space-y-2">
-                <Label htmlFor="gen-count">Số lượng câu hỏi (1 – 120)</Label>
+                <Label htmlFor="gen-count">Số lượng câu hỏi (1 – 500)</Label>
                 <div className="flex flex-wrap items-center gap-2">
                   <Input
                     id="gen-count"
                     type="number"
                     min={1}
-                    max={120}
+                    max={500}
                     value={questionCount}
                     onChange={(e) => {
                       const raw = e.target.value;
@@ -307,7 +307,7 @@ export function GenerateQuizPage() {
                     className="w-24 h-9 font-semibold"
                   />
                   <div className="flex flex-wrap gap-1.5">
-                    {[10, 20, 30, 50, 60, 120].map((preset) => (
+                    {[10, 20, 30, 50, 120, 300, 500].map((preset) => (
                       <button
                         key={preset}
                         type="button"
@@ -386,7 +386,7 @@ export function GenerateQuizPage() {
                     id="gen-def-q"
                     type="number"
                     min={1}
-                    max={120}
+                    max={500}
                     value={defaultExamQuestions}
                     onChange={(e) => {
                       const raw = e.target.value;
