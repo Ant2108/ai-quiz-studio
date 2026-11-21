@@ -8,7 +8,7 @@ import { handleCorsPreflight } from "../_shared/cors.ts";
 import { AppError, errorResponse, jsonResponse } from "../_shared/response.ts";
 import { enforceAiRateLimit, requireAuth } from "../_shared/auth.ts";
 import { requireUuid, validateDocumentFile } from "../_shared/validation.ts";
-import { analyzeDocumentWithGemini } from "../_shared/gemini.ts";
+import { processOrRecoverDocument } from "../_shared/document-pipeline.ts";
 
 Deno.serve(async (req: Request) => {
   const preflight = handleCorsPreflight(req);
@@ -51,6 +51,8 @@ Deno.serve(async (req: Request) => {
       typeof (body as Record<string, unknown>).preferred_model === "string"
         ? ((body as Record<string, unknown>).preferred_model as string).trim() || null
         : null;
+    const recoverPersistence = Boolean((body as Record<string, unknown>).recover_persistence);
+    const forceReanalyze = Boolean((body as Record<string, unknown>).force_reanalyze);
 
     // 1. Fetch document and verify ownership
     const { data: doc, error: docError } = await adminClient
@@ -71,18 +73,26 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // 2. Check AI Rate Limit
-    await enforceAiRateLimit(adminClient, user.id, "process_document");
+    // 2. Check AI Rate Limit only if Gemini extraction is needed (skip on DB-only recovery)
+    const hasRecoverableJsonb =
+      !forceReanalyze &&
+      Array.isArray(doc.extracted_data?.questions) &&
+      doc.extracted_data.questions.length > 0 &&
+      (!doc.question_bank_synced || recoverPersistence);
+
+    if (!hasRecoverableJsonb) {
+      await enforceAiRateLimit(adminClient, user.id, "process_document");
+    }
 
     // 3. Validate file format, MIME type, and size
-    const { normalizedExt, normalizedMime } = validateDocumentFile({
+    const { normalizedMime } = validateDocumentFile({
       fileName: doc.file_name,
       fileType: doc.file_type,
       mimeType: doc.mime_type,
       fileSize: doc.file_size,
     });
 
-    // 4. Mark document status as processing
+    // 4. Mark document status as processing (preserving any existing extracted_data!)
     await adminClient
       .from("documents")
       .update({
@@ -92,83 +102,110 @@ Deno.serve(async (req: Request) => {
       })
       .eq("id", documentId);
 
-    const hasClientText = Boolean(clientExtractedText && clientExtractedText.trim().length >= 40);
-    let fileBytes = new Uint8Array(0);
-    let actualFileSize = Number(doc.file_size || 0);
-
-    if (!hasClientText) {
-      // 5. Download file from Supabase Storage private bucket 'exam-documents'
-      const { data: fileBlob, error: storageError } = await adminClient.storage
-        .from("exam-documents")
-        .download(doc.file_path);
-
-      if (storageError || !fileBlob) {
-        throw new AppError(
-          `Không thể tải file từ Storage (${storageError?.message || "File not found"}).`,
-          404,
-          "STORAGE_DOWNLOAD_FAILED",
-        );
-      }
-
-      const fileBuffer = await fileBlob.arrayBuffer();
-      fileBytes = new Uint8Array(fileBuffer);
-      actualFileSize = fileBytes.byteLength;
-
-      validateDocumentFile({
-        fileName: doc.file_name,
-        fileType: normalizedExt,
-        mimeType: fileBlob.type || normalizedMime,
-        fileSize: actualFileSize,
-      });
-    }
-
-    // 6. Analyze document & perform OCR / text extraction with Gemini
-    const analysis = await analyzeDocumentWithGemini({
-      fileBytes,
-      fileName: doc.file_name,
-      mimeType: normalizedMime,
-      ext: normalizedExt,
+    // 5. Execute Checkpointed Processing or Zero-Gemini Recovery
+    const result = await processOrRecoverDocument({
+      doc,
+      actorUserId: user.id,
       clientExtractedText,
       clientPageCount,
-      deps: { preferredModelId },
+      preferredModelId,
+      recoverPersistence,
+      forceReanalyze,
+      repo: {
+        async downloadStorageFile(filePath: string) {
+          const { data: fileBlob, error: storageError } = await adminClient.storage
+            .from("exam-documents")
+            .download(filePath);
+          if (storageError || !fileBlob) {
+            throw new AppError(
+              `Không thể tải file từ Storage (${storageError?.message || "File not found"}).`,
+              404,
+              "STORAGE_DOWNLOAD_FAILED",
+            );
+          }
+          const fileBuffer = await fileBlob.arrayBuffer();
+          return { bytes: new Uint8Array(fileBuffer), mimeType: fileBlob.type || null };
+        },
+        async saveExtractedCheckpoint(cp) {
+          const { error: cpError } = await adminClient
+            .from("documents")
+            .update({
+              mime_type: cp.mimeType,
+              file_size: cp.fileSize,
+              page_count: cp.pageCount,
+              extracted_text: cp.extractedText,
+              ai_summary: cp.summary,
+              extracted_data: cp.extractedData,
+              question_bank_synced: false,
+            })
+            .eq("id", cp.documentId);
+          if (cpError) {
+            throw new AppError(
+              `Không thể lưu dữ liệu extracted_data: ${cpError.message}`,
+              500,
+              "DOCUMENT_CHECKPOINT_FAILED",
+            );
+          }
+        },
+        async syncQuestionBank(sync) {
+          const { data: syncRes, error: syncErr } = await adminClient.rpc(
+            "rpc_sync_document_question_bank",
+            {
+              p_document_id: sync.documentId,
+              p_user_id: sync.userId,
+              p_questions: sync.questions,
+              p_replace: sync.replace,
+            },
+          );
+          if (syncErr || !syncRes) {
+            throw new AppError(
+              `Không thể đồng bộ Ngân hàng câu hỏi: ${syncErr?.message || "Sync failed"}`,
+              500,
+              "QUESTION_BANK_SYNC_FAILED",
+            );
+          }
+          return syncRes as { synced_count: number; already_synced: boolean };
+        },
+        async markDocumentProcessed(docId: string) {
+          const { data: updatedDoc, error: updateError } = await adminClient
+            .from("documents")
+            .update({
+              status: "processed",
+              processing_error: null,
+              processed_at: new Date().toISOString(),
+            })
+            .eq("id", docId)
+            .select(
+              "id, user_id, file_name, file_path, file_type, mime_type, file_size, page_count, status, visibility, ai_summary, question_bank_synced, processed_at, created_at",
+            )
+            .single();
+          if (updateError || !updatedDoc) {
+            throw new AppError(
+              `Không thể cập nhật trạng thái tài liệu: ${updateError?.message || "Update failed"}`,
+              500,
+              "DOCUMENT_UPDATE_FAILED",
+            );
+          }
+          return updatedDoc;
+        },
+        async markDocumentFailed(docId: string, errorMessage: string) {
+          await adminClient
+            .from("documents")
+            .update({ status: "failed", processing_error: errorMessage.slice(0, 500) })
+            .eq("id", docId);
+        },
+      },
     });
-
-    const processedAt = new Date().toISOString();
-
-    // 7. Save extracted text, AI summary, and status='processed'
-    const { data: updatedDoc, error: updateError } = await adminClient
-      .from("documents")
-      .update({
-        status: "processed",
-        mime_type: normalizedMime,
-        file_size: actualFileSize,
-        page_count: analysis.pageCount,
-        extracted_text: analysis.extractedText,
-        ai_summary: analysis.summary,
-        processing_error: null,
-        processed_at: processedAt,
-      })
-      .eq("id", documentId)
-      .select(
-        "id, user_id, file_name, file_path, file_type, mime_type, file_size, page_count, status, visibility, ai_summary, processed_at, created_at",
-      )
-      .single();
-
-    if (updateError) {
-      throw new AppError(
-        `Không thể cập nhật trạng thái tài liệu: ${updateError.message}`,
-        500,
-        "DOCUMENT_UPDATE_FAILED",
-      );
-    }
 
     return jsonResponse(
       {
         success: true,
-        document: updatedDoc,
-        extracted_length: analysis.extractedText.length,
-        ai_summary: analysis.summary,
-        ai_meta: analysis.aiMeta,
+        document: result.document,
+        extracted_length: result.extractedLength,
+        ai_summary: result.summary,
+        synced_questions: result.syncedQuestions,
+        recovered_without_gemini: result.recoveredWithoutGemini,
+        ai_meta: result.aiMeta,
       },
       200,
       req,

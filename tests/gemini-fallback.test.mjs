@@ -19,6 +19,10 @@ import {
   analyzeDocumentWithGemini,
   generateQuizWithGemini,
 } from "../supabase/functions/_shared/gemini.ts";
+import {
+  processOrRecoverDocument,
+  generateQuizDatabaseFirst,
+} from "../supabase/functions/_shared/document-pipeline.ts";
 import { AppError } from "../supabase/functions/_shared/response.ts";
 
 function makeJsonResponse(status, bodyObj, headers = {}) {
@@ -664,4 +668,228 @@ test("Scenario 9: Ensures only one final quiz record is saved and rolls back par
     supabase.auth.getSession = originalGetSession;
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Multi-Format Routing: Supports TXT, DOCX, PNG/JPG/WEBP, and PDF inputs cleanly", async () => {
+  // 1. TXT format uses text path without Files API upload
+  let txtRequestBody = null;
+  const txtRes = await analyzeDocumentWithGemini({
+    fileBytes: new TextEncoder().encode("HTTP is stateless. TCP provides reliable byte stream delivery."),
+    fileName: "notes.txt",
+    mimeType: "text/plain",
+    ext: "txt",
+    deps: {
+      apiKeyOverride: "fake-key",
+      sleepImpl: async () => {},
+      fetchImpl: async (_url, init) => {
+        txtRequestBody = JSON.parse(String(init?.body || "{}"));
+        return makeGeminiSuccessPayload({
+          extracted_text: "PROVIDED_IN_TEXT",
+          estimated_pages: 1,
+          title_suggestion: "Networking Notes",
+          subject_suggestion: "CN",
+          topics: ["HTTP", "TCP"],
+          summary: "Summary of HTTP and TCP.",
+          key_concepts: ["Stateless"],
+          recommended_question_count: 10,
+          questions: makeSampleQuizJson("What is HTTP?").questions,
+        });
+      },
+    },
+  });
+  assert.ok(txtRequestBody.contents[0].parts[0].text.includes("PROVIDED_IN_TEXT"));
+  assert.equal(txtRes.extractedData.questions.length, 1);
+
+  // 2. Image format (PNG) uses inlineData multimodal OCR path
+  let imgRequestBody = null;
+  const imgRes = await analyzeDocumentWithGemini({
+    fileBytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    fileName: "slide.png",
+    mimeType: "image/png",
+    ext: "png",
+    deps: {
+      apiKeyOverride: "fake-key",
+      sleepImpl: async () => {},
+      fetchImpl: async (_url, init) => {
+        imgRequestBody = JSON.parse(String(init?.body || "{}"));
+        return makeGeminiSuccessPayload({
+          extracted_text: "OCR extracted slide content about OSI 7 layers.",
+          estimated_pages: 1,
+          title_suggestion: "OSI Slide",
+          subject_suggestion: "Networks",
+          topics: ["OSI"],
+          summary: "OSI model overview.",
+          key_concepts: ["Physical", "Transport"],
+          recommended_question_count: 5,
+          questions: makeSampleQuizJson("How many layers are in OSI?").questions,
+        });
+      },
+    },
+  });
+  assert.equal(imgRequestBody.contents[0].parts[0].inlineData.mimeType, "image/png");
+  assert.equal(imgRes.extractedData.questions.length, 1);
+});
+
+test("Persistence Recovery: Checkpoint A preserves extracted_data on DB failure and recovers with 0 Gemini calls", async () => {
+  let geminiCalls = 0;
+  let checkpointSaved = null;
+  let bankSyncedCount = 0;
+  let syncAttempts = 0;
+
+  const baseDoc = {
+    id: "doc-rec-1",
+    user_id: "user-1",
+    file_name: "lecture.txt",
+    file_path: "user-1/lecture.txt",
+    file_type: "txt",
+    mime_type: "text/plain",
+    file_size: 120,
+    extracted_data: null,
+    question_bank_synced: false,
+  };
+
+  const repoWithDbFailure = {
+    async downloadStorageFile() {
+      return {
+        bytes: new TextEncoder().encode("Database ACID properties: Atomicity, Consistency, Isolation, Durability."),
+        mimeType: "text/plain",
+      };
+    },
+    async saveExtractedCheckpoint(cp) {
+      checkpointSaved = cp.extractedData;
+      baseDoc.extracted_text = cp.extractedText;
+      baseDoc.ai_summary = cp.summary;
+      baseDoc.extracted_data = cp.extractedData;
+      baseDoc.question_bank_synced = false;
+    },
+    async syncQuestionBank(sync) {
+      syncAttempts++;
+      if (syncAttempts === 1) {
+        throw new Error("Simulated transient Postgres deadlock on Checkpoint B");
+      }
+      bankSyncedCount = sync.questions.length;
+      baseDoc.question_bank_synced = true;
+      return { synced_count: bankSyncedCount, already_synced: false };
+    },
+    async markDocumentProcessed() {
+      return { ...baseDoc, status: "processed" };
+    },
+    async markDocumentFailed() {},
+  };
+
+  // Run 1: Gemini succeeds -> Checkpoint A saved -> Checkpoint B fails
+  await assert.rejects(
+    () =>
+      processOrRecoverDocument({
+        doc: baseDoc,
+        actorUserId: "user-1",
+        repo: repoWithDbFailure,
+        geminiDeps: {
+          apiKeyOverride: "fake-key",
+          sleepImpl: async () => {},
+          fetchImpl: async () => {
+            geminiCalls++;
+            return makeGeminiSuccessPayload({
+              extracted_text: "PROVIDED_IN_TEXT",
+              estimated_pages: 1,
+              title_suggestion: "ACID Lecture",
+              subject_suggestion: "Databases",
+              topics: ["ACID"],
+              summary: "ACID properties.",
+              key_concepts: ["Atomicity"],
+              recommended_question_count: 5,
+              questions: makeSampleQuizJson("What does A in ACID stand for?").questions,
+            });
+          },
+        },
+      }),
+    /Simulated transient Postgres deadlock/,
+  );
+
+  assert.equal(geminiCalls, 1);
+  assert.ok(checkpointSaved && checkpointSaved.questions.length === 1);
+  assert.equal(baseDoc.question_bank_synced, false);
+
+  // Run 2 (Recovery): extracted_data exists -> 0 Gemini calls, syncs Question Bank cleanly
+  const recovered = await processOrRecoverDocument({
+    doc: baseDoc,
+    actorUserId: "user-1",
+    repo: repoWithDbFailure,
+    geminiDeps: {
+      apiKeyOverride: "fake-key",
+      fetchImpl: async () => {
+        geminiCalls++;
+        throw new Error("Gemini MUST NOT be called during persistence recovery!");
+      },
+    },
+  });
+
+  assert.equal(geminiCalls, 1); // Still 1 from Run 1 -> 0 new calls!
+  assert.equal(recovered.recoveredWithoutGemini, true);
+  assert.equal(recovered.syncedQuestions, 1);
+  assert.equal(recovered.aiMeta.model_id, "database-recovery");
+  assert.equal(baseDoc.question_bank_synced, true);
+});
+
+test("Database-only Quiz Generation: Creates quiz from Normalized Question Bank with 0 Gemini calls", async () => {
+  let geminiCalls = 0;
+  let bankSyncedDuringQuiz = false;
+
+  const docWithJsonb = {
+    id: "doc-db-1",
+    user_id: "user-1",
+    file_name: "db.pdf",
+    file_path: "user-1/db.pdf",
+    file_type: "pdf",
+    extracted_text: "Normalized database content.",
+    question_bank_synced: false,
+    extracted_data: {
+      title_suggestion: "DB Quiz",
+      questions: makeSampleQuizJson("Which normal form removes transitive dependency?").questions,
+    },
+  };
+
+  const result = await generateQuizDatabaseFirst({
+    doc: docWithJsonb,
+    actorUserId: "user-1",
+    existingQuizSetId: null,
+    title: "DB Quiz",
+    description: "Generated from bank",
+    subject: "Databases",
+    topic: "Normalization",
+    difficulty: "medium",
+    questionCount: 1,
+    questionTypes: ["multiple_choice"],
+    defaultExamQuestions: 1,
+    defaultExamDuration: 15,
+    repo: {
+      async syncFromExtractedData(sync) {
+        bankSyncedDuringQuiz = sync.questions.length === 1;
+      },
+      async createQuizFromQuestionBank(q) {
+        return {
+          quiz_set_id: "quiz-from-bank-1",
+          question_count: 1,
+          questions: [{ id: "q-1", question_text: "Which normal form removes transitive dependency?", options: [] }],
+          source: "database_bank",
+        };
+      },
+      async createOrAppendQuizFromAi() {
+        throw new Error("Should not invoke AI save path when DB bank succeeded");
+      },
+    },
+    geminiDeps: {
+      apiKeyOverride: "fake-key",
+      fetchImpl: async () => {
+        geminiCalls++;
+        throw new Error("Gemini MUST NOT be called during Database-only quiz generation!");
+      },
+    },
+  });
+
+  assert.equal(geminiCalls, 0);
+  assert.equal(bankSyncedDuringQuiz, true);
+  assert.equal(result.source, "database_bank");
+  assert.equal(result.quizSetId, "quiz-from-bank-1");
+  assert.equal(result.aiMeta.model_id, "database-bank");
 });

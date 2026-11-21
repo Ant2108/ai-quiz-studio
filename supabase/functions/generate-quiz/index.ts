@@ -20,10 +20,8 @@ import { handleCorsPreflight } from "../_shared/cors.ts";
 import { AppError, errorResponse, jsonResponse } from "../_shared/response.ts";
 import { enforceAiRateLimit, requireAuth } from "../_shared/auth.ts";
 import { requireUuid, validateDocumentFile } from "../_shared/validation.ts";
-import {
-  analyzeDocumentWithGemini,
-  generateQuizWithGemini,
-} from "../_shared/gemini.ts";
+import { analyzeDocumentWithGemini } from "../_shared/gemini.ts";
+import { generateQuizDatabaseFirst } from "../_shared/document-pipeline.ts";
 
 Deno.serve(async (req: Request) => {
   const preflight = handleCorsPreflight(req);
@@ -58,6 +56,7 @@ Deno.serve(async (req: Request) => {
       typeof payload.preferred_model === "string" && payload.preferred_model.trim()
         ? payload.preferred_model.trim()
         : null;
+    const forceAi = Boolean(payload.force_ai);
 
     // 1. Validate inputs
     const rawTitle = typeof payload.title === "string" ? payload.title.trim() : "";
@@ -151,9 +150,13 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // 4. Ensure document has extracted_text (auto-process if not yet extracted)
-    let documentText: string = (doc.extracted_text || "").trim();
-    if (!documentText) {
+    // 4. Ensure document has extracted_text or extracted_data (auto-process if not yet extracted)
+    let workingDoc = doc;
+    const hasExtractedText = Boolean((doc.extracted_text || "").trim());
+    const hasBankQuestions =
+      Array.isArray(doc.extracted_data?.questions) && doc.extracted_data.questions.length > 0;
+
+    if (!hasExtractedText && !hasBankQuestions) {
       const { normalizedExt, normalizedMime } = validateDocumentFile({
         fileName: doc.file_name,
         fileType: doc.file_type,
@@ -182,43 +185,36 @@ Deno.serve(async (req: Request) => {
         deps: { preferredModelId },
       });
 
-      documentText = analysis.extractedText;
-
-      await adminClient
+      const { data: updatedDoc } = await adminClient
         .from("documents")
         .update({
           status: "processed",
           extracted_text: analysis.extractedText,
           page_count: analysis.pageCount,
           ai_summary: analysis.summary,
+          extracted_data: analysis.extractedData,
+          question_bank_synced: false,
           processed_at: new Date().toISOString(),
         })
-        .eq("id", documentId);
+        .eq("id", documentId)
+        .select("*")
+        .single();
+
+      if (updatedDoc) {
+        workingDoc = updatedDoc;
+      }
     }
 
     const quizTitle =
       rawTitle ||
-      doc.ai_summary?.title_suggestion ||
-      `Bộ đề: ${doc.file_name.replace(/\.[^.]+$/, "")}`;
-
-    // 5. Call Gemini AI and validate full JSON schema + options + answer keys
-    const generated = await generateQuizWithGemini({
-      documentText,
-      title: quizTitle,
-      subject,
-      topic,
-      difficulty,
-      questionCount,
-      questionTypes,
-      startChunkIndex,
-      deps: { preferredModelId },
-    });
+      workingDoc.ai_summary?.title_suggestion ||
+      `Bộ đề: ${workingDoc.file_name.replace(/\.[^.]+$/, "")}`;
 
     const defaultExamQuestions =
       typeof payload.default_exam_questions === "number" &&
         payload.default_exam_questions > 0
-        ? Math.min(generated.questions.length, Math.round(payload.default_exam_questions))
-        : Math.min(60, generated.questions.length);
+        ? Math.min(questionCount, Math.round(payload.default_exam_questions))
+        : Math.min(60, questionCount);
 
     const defaultExamDuration =
       typeof payload.default_exam_duration === "number" &&
@@ -226,52 +222,130 @@ Deno.serve(async (req: Request) => {
         ? Math.round(payload.default_exam_duration)
         : 60;
 
-    // 6. Save or append quiz_set + questions + question_options + question_answers inside a single DB transaction
-    // The RPC returns the preview questions & options WITHOUT answer keys!
-    const { data: txResult, error: txError } = existingQuizSetId
-      ? await adminClient.rpc("rpc_append_questions_to_quiz", {
-          p_quiz_set_id: existingQuizSetId,
-          p_user_id: user.id,
-          p_document_id: documentId,
-          p_difficulty: difficulty,
-          p_questions: generated.questions,
-        })
-      : await adminClient.rpc("rpc_create_quiz_with_questions", {
-          p_user_id: user.id,
-          p_document_id: documentId,
-          p_title: generated.title || quizTitle,
-          p_description:
-            description ||
-            `Bộ đề trắc nghiệm được tạo tự động từ tài liệu ${doc.file_name}`,
-          p_subject: subject,
-          p_topic: topic,
-          p_difficulty: difficulty,
-          p_default_exam_questions: defaultExamQuestions,
-          p_default_exam_duration: defaultExamDuration,
-          p_questions: generated.questions,
-        });
+    const quizDescription =
+      description ||
+      `Bộ đề trắc nghiệm được tạo từ tài liệu ${workingDoc.file_name}`;
 
-    if (txError || !txResult) {
-      throw new AppError(
-        `Không thể lưu bộ đề vào cơ sở dữ liệu: ${txError?.message || "Transaction failed"}`,
-        500,
-        "QUIZ_CREATION_TRANSACTION_FAILED",
-      );
-    }
+    // 5. Database-only Quiz Generation first (falls back to Gemini AI only if bank is empty or force_ai=true)
+    const generated = await generateQuizDatabaseFirst({
+      doc: workingDoc,
+      actorUserId: user.id,
+      existingQuizSetId,
+      title: quizTitle,
+      description: quizDescription,
+      subject,
+      topic,
+      difficulty,
+      questionCount,
+      questionTypes,
+      defaultExamQuestions,
+      defaultExamDuration,
+      startChunkIndex,
+      preferredModelId,
+      forceAi,
+      repo: {
+        async syncFromExtractedData(sync) {
+          const { error: syncErr } = await adminClient.rpc(
+            "rpc_sync_document_question_bank",
+            {
+              p_document_id: sync.documentId,
+              p_user_id: sync.userId,
+              p_questions: sync.questions,
+              p_replace: false,
+            },
+          );
+          if (syncErr) {
+            throw new AppError(
+              `Không thể đồng bộ Ngân hàng câu hỏi: ${syncErr.message}`,
+              500,
+              "QUESTION_BANK_SYNC_FAILED",
+            );
+          }
+        },
+        async createQuizFromQuestionBank(qParams) {
+          const { data: bankRes, error: bankErr } = await adminClient.rpc(
+            "rpc_create_quiz_from_question_bank",
+            {
+              p_user_id: qParams.userId,
+              p_document_id: qParams.documentId,
+              p_quiz_set_id: qParams.quizSetId,
+              p_title: qParams.title,
+              p_description: qParams.description,
+              p_subject: qParams.subject,
+              p_topic: qParams.topic,
+              p_difficulty: qParams.difficulty,
+              p_question_count: qParams.questionCount,
+              p_question_types: qParams.questionTypes,
+              p_default_exam_questions: qParams.defaultExamQuestions,
+              p_default_exam_duration: qParams.defaultExamDuration,
+            },
+          );
+          if (bankErr) {
+            throw new AppError(
+              `Lỗi tạo đề từ Ngân hàng câu hỏi Database: ${bankErr.message}`,
+              500,
+              "DATABASE_QUIZ_GENERATION_FAILED",
+            );
+          }
+          return bankRes as {
+            quiz_set_id: string;
+            question_count: number;
+            questions: unknown[];
+            source: string;
+          };
+        },
+        async createOrAppendQuizFromAi(aiParams) {
+          const { data: txResult, error: txError } = aiParams.quizSetId
+            ? await adminClient.rpc("rpc_append_questions_to_quiz", {
+                p_quiz_set_id: aiParams.quizSetId,
+                p_user_id: aiParams.userId,
+                p_document_id: aiParams.documentId,
+                p_difficulty: aiParams.difficulty,
+                p_questions: aiParams.questions,
+              })
+            : await adminClient.rpc("rpc_create_quiz_with_questions", {
+                p_user_id: aiParams.userId,
+                p_document_id: aiParams.documentId,
+                p_title: aiParams.title,
+                p_description: aiParams.description,
+                p_subject: aiParams.subject,
+                p_topic: aiParams.topic,
+                p_difficulty: aiParams.difficulty,
+                p_default_exam_questions: aiParams.defaultExamQuestions,
+                p_default_exam_duration: aiParams.defaultExamDuration,
+                p_questions: aiParams.questions,
+              });
+
+          if (txError || !txResult) {
+            throw new AppError(
+              `Không thể lưu bộ đề vào cơ sở dữ liệu: ${txError?.message || "Transaction failed"}`,
+              500,
+              "QUIZ_CREATION_TRANSACTION_FAILED",
+            );
+          }
+          return txResult as {
+            quiz_set_id: string;
+            question_count: number;
+            questions: unknown[];
+          };
+        },
+      },
+    });
 
     const { data: quizSet } = await adminClient
       .from("quiz_sets")
       .select("*")
-      .eq("id", txResult.quiz_set_id)
+      .eq("id", generated.quizSetId)
       .single();
 
-    // 7. Return Preview WITHOUT answer keys
+    // 6. Return Preview WITHOUT answer keys
     return jsonResponse(
       {
         success: true,
         quiz_set: quizSet,
-        question_count: txResult.question_count,
-        preview_questions: txResult.questions,
+        question_count: generated.questionCount,
+        preview_questions: generated.previewQuestions,
+        source: generated.source,
         ai_meta: generated.aiMeta,
       },
       201,

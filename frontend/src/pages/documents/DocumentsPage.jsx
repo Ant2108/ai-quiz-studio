@@ -110,7 +110,11 @@ export function DocumentsPage() {
     setReprocessingId(doc.id);
     try {
       const res = await reprocessDocument(doc.id);
-      if (res?.ai_meta?.fallback_triggered) {
+      if (res?.recovered_without_gemini) {
+        toast.success(
+          `Đã khôi phục Ngân hàng câu hỏi cho "${doc.file_name}" từ dữ liệu JSONB (0 Gemini calls)`,
+        );
+      } else if (res?.ai_meta?.fallback_triggered) {
         toast.success(
           `Đã phân tích lại "${doc.file_name}" bằng ${res.ai_meta.model_name} (dự phòng)`,
         );

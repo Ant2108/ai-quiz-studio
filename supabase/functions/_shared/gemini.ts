@@ -562,6 +562,17 @@ export interface DocumentAnalysisResult {
     key_concepts: string[];
     recommended_question_count: number;
   };
+  extractedData: {
+    schema_version: number;
+    title_suggestion: string;
+    subject_suggestion: string;
+    topics: string[];
+    summary: string;
+    key_concepts: string[];
+    recommended_question_count: number;
+    extracted_text: string;
+    questions: ValidatedGeneratedQuestion[];
+  };
   aiMeta: GeminiExecutionMeta;
 }
 
@@ -739,7 +750,7 @@ export async function analyzeDocumentWithGemini(params: {
     "Chỉ trích xuất và tóm tắt thông tin có thật trong tài liệu nguồn, tuyệt đối không bịa thêm kiến thức ngoài tài liệu. " +
     "Trả về duy nhất 1 JSON object hợp lệ theo đúng cấu trúc yêu cầu.";
 
-  const analysisPrompt = `Hãy đọc tài liệu "${fileName}" và trả về JSON theo cấu trúc sau:
+  const analysisPrompt = `Hãy đọc tài liệu "${fileName}" và trả về JSON có cấu trúc theo mẫu sau:
 {
   "extracted_text": "Toàn bộ nội dung văn bản trích xuất / OCR từ tài liệu (giữ nguyên các định nghĩa, công thức LaTeX nếu có, đánh dấu [Trang X] nếu xác định được trang)",
   "estimated_pages": 1,
@@ -748,8 +759,26 @@ export async function analyzeDocumentWithGemini(params: {
   "topics": ["Chủ đề 1", "Chủ đề 2"],
   "summary": "Tóm tắt ngắn gọn nội dung tài liệu trong 2-4 câu",
   "key_concepts": ["Khái niệm 1", "Khái niệm 2"],
-  "recommended_question_count": 20
-}`;
+  "recommended_question_count": 20,
+  "questions": [
+    {
+      "question_text": "Câu hỏi trắc nghiệm bám sát nội dung tài liệu?",
+      "question_type": "multiple_choice",
+      "difficulty": "medium",
+      "options": [
+        { "option_label": "A", "option_content": "Phương án A" },
+        { "option_label": "B", "option_content": "Phương án B" },
+        { "option_label": "C", "option_content": "Phương án C" },
+        { "option_label": "D", "option_content": "Phương án D" }
+      ],
+      "correct_option_label": "A",
+      "explanation": "Giải thích ngắn gọn theo tài liệu nguồn.",
+      "formula_latex": null,
+      "source_page": 1
+    }
+  ]
+}
+Lưu ý: Tạo tối đa 20 câu hỏi chất lượng cao (đa dạng easy/medium/hard, chỉ dựa trên nội dung tài liệu) trong mảng "questions" để lưu vào Ngân hàng câu hỏi.`;
 
   const parts: Array<Record<string, unknown>> = [];
   let uploadedGeminiFileName: string | null = null;
@@ -837,33 +866,55 @@ export async function analyzeDocumentWithGemini(params: {
       ? Math.round(parsed.estimated_pages)
       : Math.max(1, Math.ceil(finalExtractedText.length / 2500));
 
+  const summary = {
+    title_suggestion:
+      typeof parsed.title_suggestion === "string" && parsed.title_suggestion.trim()
+        ? parsed.title_suggestion.trim()
+        : fileName.replace(/\.[^.]+$/, ""),
+    subject_suggestion:
+      typeof parsed.subject_suggestion === "string" && parsed.subject_suggestion.trim()
+        ? parsed.subject_suggestion.trim()
+        : "Tổng hợp",
+    topics: Array.isArray(parsed.topics)
+      ? parsed.topics.map((t) => String(t)).filter(Boolean).slice(0, 10)
+      : [],
+    summary:
+      typeof parsed.summary === "string" && parsed.summary.trim()
+        ? parsed.summary.trim()
+        : "Tài liệu đã được phân tích thành công.",
+    key_concepts: Array.isArray(parsed.key_concepts)
+      ? parsed.key_concepts.map((c) => String(c)).filter(Boolean).slice(0, 15)
+      : [],
+    recommended_question_count:
+      typeof parsed.recommended_question_count === "number" &&
+        parsed.recommended_question_count > 0
+        ? Math.min(120, Math.max(5, Math.round(parsed.recommended_question_count)))
+        : 20,
+  };
+
+  let validatedBankQuestions: ValidatedGeneratedQuestion[] = [];
+  if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+    try {
+      const validated = validateGeneratedQuizPayload(
+        { title: summary.title_suggestion, questions: parsed.questions },
+        summary.title_suggestion,
+        "medium",
+      );
+      validatedBankQuestions = validated.questions;
+    } catch {
+      validatedBankQuestions = [];
+    }
+  }
+
   return {
     extractedText: finalExtractedText,
     pageCount,
-    summary: {
-      title_suggestion:
-        typeof parsed.title_suggestion === "string" && parsed.title_suggestion.trim()
-          ? parsed.title_suggestion.trim()
-          : fileName.replace(/\.[^.]+$/, ""),
-      subject_suggestion:
-        typeof parsed.subject_suggestion === "string" && parsed.subject_suggestion.trim()
-          ? parsed.subject_suggestion.trim()
-          : "Tổng hợp",
-      topics: Array.isArray(parsed.topics)
-        ? parsed.topics.map((t) => String(t)).filter(Boolean).slice(0, 10)
-        : [],
-      summary:
-        typeof parsed.summary === "string" && parsed.summary.trim()
-          ? parsed.summary.trim()
-          : "Tài liệu đã được phân tích thành công.",
-      key_concepts: Array.isArray(parsed.key_concepts)
-        ? parsed.key_concepts.map((c) => String(c)).filter(Boolean).slice(0, 15)
-        : [],
-      recommended_question_count:
-        typeof parsed.recommended_question_count === "number" &&
-          parsed.recommended_question_count > 0
-          ? Math.min(120, Math.max(5, Math.round(parsed.recommended_question_count)))
-          : 20,
+    summary,
+    extractedData: {
+      schema_version: 1,
+      ...summary,
+      extracted_text: finalExtractedText,
+      questions: validatedBankQuestions,
     },
     aiMeta,
   };

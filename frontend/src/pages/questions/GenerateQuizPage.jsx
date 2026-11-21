@@ -133,7 +133,11 @@ export function GenerateQuizPage() {
       });
 
       setGeneratedResult(result);
-      if (result?.ai_meta?.fallback_triggered) {
+      if (result?.ai_meta?.model_id === "database-bank") {
+        toast.success(
+          `Tạo đề thành công từ Ngân hàng câu hỏi Database! (${result.question_count} câu hỏi)`,
+        );
+      } else if (result?.ai_meta?.fallback_triggered) {
         toast.success(
           `Tạo đề thành công bằng ${result.ai_meta.model_name} (tự động chuyển dự phòng) — ${result.question_count} câu hỏi!`,
         );
