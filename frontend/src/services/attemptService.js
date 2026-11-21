@@ -38,13 +38,15 @@ export const attemptService = {
   async answerQuestion({
     attemptId,
     attemptQuestionId,
-    selectedOptionId,
+    selectedOptionId = null,
+    selectedOptionIds = null,
     answerText = null,
   }) {
     return await invokeEdgeFunction("answer-question", {
       attempt_id: attemptId,
       attempt_question_id: attemptQuestionId,
       selected_option_id: selectedOptionId,
+      ...(Array.isArray(selectedOptionIds) ? { selected_option_ids: selectedOptionIds } : {}),
       answer_text: answerText,
     });
   },
@@ -102,7 +104,15 @@ export const attemptService = {
 
     const savedResponsesMap = {};
     for (const r of responses || []) {
-      savedResponsesMap[r.attempt_question_id] = r.selected_option_id;
+      if (typeof r.answer_text === "string" && r.answer_text.startsWith("MULTI_IDS:")) {
+        savedResponsesMap[r.attempt_question_id] = r.answer_text
+          .slice("MULTI_IDS:".length)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      } else {
+        savedResponsesMap[r.attempt_question_id] = r.selected_option_id;
+      }
     }
 
     return {

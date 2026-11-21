@@ -253,9 +253,19 @@ export function ResultPage() {
             <Card key={q.attempt_question_id} className="border-slate-200/80 shadow-xs">
               <CardContent className="p-5 sm:p-6 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-bold uppercase text-primary">
-                    Câu {q.position}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold uppercase text-primary">
+                      Câu {q.position}
+                    </span>
+                    {q.is_multi_select && (
+                      <Badge
+                        variant="outline"
+                        className="bg-indigo-50 text-indigo-700 border-indigo-200 rounded-md text-[11px]"
+                      >
+                        Chọn nhiều đáp án ({q.required_answer_count || q.correct_option_ids?.length || 2} đáp án đúng)
+                      </Badge>
+                    )}
+                  </div>
 
                   {q.is_correct ? (
                     <Badge
@@ -304,14 +314,27 @@ export function ResultPage() {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {(q.options || []).map((opt) => {
+                    const selectedIdsList = Array.isArray(q.selected_option_ids) && q.selected_option_ids.length > 0
+                      ? q.selected_option_ids
+                      : q.selected_option_id
+                      ? [q.selected_option_id]
+                      : [];
+                    const correctIdsList = Array.isArray(q.correct_option_ids) && q.correct_option_ids.length > 0
+                      ? q.correct_option_ids
+                      : q.correct_option_id
+                      ? [q.correct_option_id]
+                      : [];
+
                     const isUserPick =
-                      q.selected_option_id &&
                       opt.id &&
-                      q.selected_option_id.toLowerCase() === opt.id.toLowerCase();
+                      selectedIdsList.some(
+                        (sid) => sid.toLowerCase() === opt.id.toLowerCase(),
+                      );
                     const isCorrectOpt =
-                      q.correct_option_id &&
                       opt.id &&
-                      q.correct_option_id.toLowerCase() === opt.id.toLowerCase();
+                      correctIdsList.some(
+                        (cid) => cid.toLowerCase() === opt.id.toLowerCase(),
+                      );
 
                     let boxCls = "border-slate-200 bg-slate-50/40 text-slate-700";
                     if (isCorrectOpt) {
@@ -336,7 +359,7 @@ export function ResultPage() {
                           {isCorrectOpt && (
                             <span className="inline-flex items-center gap-1 text-emerald-700 font-bold">
                               <CheckCircle2 className="size-4" />
-                              Đáp án đúng
+                              {isUserPick ? "Đúng • Bạn chọn" : "Đáp án đúng"}
                             </span>
                           )}
                           {isUserPick && !isCorrectOpt && (

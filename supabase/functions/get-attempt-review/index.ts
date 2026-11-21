@@ -12,7 +12,11 @@
 import { handleCorsPreflight } from "../_shared/cors.ts";
 import { AppError, errorResponse, jsonResponse } from "../_shared/response.ts";
 import { requireAuth } from "../_shared/auth.ts";
-import { requireUuid } from "../_shared/validation.ts";
+import {
+  parseMultiAnswerLabels,
+  parseMultiSelectedIds,
+  requireUuid,
+} from "../_shared/validation.ts";
 
 Deno.serve(async (req: Request) => {
   const preflight = handleCorsPreflight(req);
@@ -133,18 +137,48 @@ Deno.serve(async (req: Request) => {
       const userResp = responseMap.get(q.id);
       const ak = answerKeyMap.get(q.id);
 
+      const optionsList = Array.isArray(q.options_snapshot)
+        ? (q.options_snapshot as Array<{ id?: string; option_label?: string }>)
+        : [];
+      const multiCorrectLabels = parseMultiAnswerLabels(ak?.correct_text);
+      const isMultiSelect = Boolean(multiCorrectLabels && multiCorrectLabels.length > 1);
+
       const selectedOptionId = userResp?.selected_option_id ?? null;
       const correctOptionId = ak?.correct_option_id ?? null;
 
-      const isAnswered =
-        selectedOptionId !== null ||
-        Boolean(userResp?.answer_text && userResp.answer_text.trim() !== "");
+      const selectedOptionIds = isMultiSelect
+        ? parseMultiSelectedIds(userResp?.answer_text)
+        : selectedOptionId
+        ? [selectedOptionId]
+        : [];
 
-      const isCorrect =
-        isAnswered &&
-        correctOptionId !== null &&
-        selectedOptionId !== null &&
-        selectedOptionId.toLowerCase() === correctOptionId.toLowerCase();
+      const correctOptionIds = isMultiSelect
+        ? optionsList
+            .filter((opt) =>
+              multiCorrectLabels!.includes(String(opt.option_label || "").trim().toUpperCase()),
+            )
+            .map((opt) => String(opt.id))
+            .filter(Boolean)
+        : correctOptionId
+        ? [correctOptionId]
+        : [];
+
+      const isAnswered = isMultiSelect
+        ? selectedOptionIds.length > 0
+        : selectedOptionId !== null ||
+          Boolean(userResp?.answer_text && userResp.answer_text.trim() !== "");
+
+      const isCorrect = isMultiSelect
+        ? isAnswered &&
+          selectedOptionIds.length === correctOptionIds.length &&
+          correctOptionIds.length > 0 &&
+          correctOptionIds.every((cid) =>
+            selectedOptionIds.some((sid) => sid.toLowerCase() === cid.toLowerCase()),
+          )
+        : isAnswered &&
+          correctOptionId !== null &&
+          selectedOptionId !== null &&
+          selectedOptionId.toLowerCase() === correctOptionId.toLowerCase();
 
       let imageUrl: string | null = null;
       if (q.image_path_snapshot) {
@@ -164,14 +198,19 @@ Deno.serve(async (req: Request) => {
         position: q.position,
         question_text: q.question_text,
         question_type: q.question_type,
+        is_multi_select: isMultiSelect,
+        required_answer_count: isMultiSelect ? multiCorrectLabels!.length : 1,
         formula_latex: q.formula_latex_snapshot,
         image_path: q.image_path_snapshot,
         image_url: imageUrl,
-        options: Array.isArray(q.options_snapshot) ? q.options_snapshot : [],
+        options: optionsList,
         selected_option_id: selectedOptionId,
+        selected_option_ids: selectedOptionIds,
         answer_text: userResp?.answer_text ?? null,
         answered_at: userResp?.answered_at ?? null,
         correct_option_id: correctOptionId,
+        correct_option_ids: correctOptionIds,
+        correct_labels: multiCorrectLabels || [],
         correct_text: ak?.correct_text ?? null,
         explanation: ak?.explanation ?? q.explanation_snapshot ?? null,
         is_answered: isAnswered,

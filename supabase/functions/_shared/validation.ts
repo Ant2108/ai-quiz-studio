@@ -130,11 +130,98 @@ export interface ValidatedGeneratedQuestion {
   difficulty: "easy" | "medium" | "hard";
   options: ValidatedGeneratedOption[];
   correct_option_label: string;
+  correct_option_labels: string[];
+  is_multi_select: boolean;
   correct_text: string | null;
   explanation: string;
   formula_latex: string | null;
   image_path: string | null;
   source_page: number | null;
+}
+
+export const MULTI_ANSWER_PREFIX = "MULTI:";
+export const MULTI_SELECTED_PREFIX = "MULTI_IDS:";
+
+/**
+ * Extracts canonical sorted multi-answer labels from `correct_text` (e.g. "MULTI:A,C" -> ["A", "C"]).
+ * Returns null if the question is a standard single-answer question.
+ */
+export function parseMultiAnswerLabels(correctText: string | null | undefined): string[] | null {
+  if (typeof correctText !== "string" || !correctText.startsWith(MULTI_ANSWER_PREFIX)) {
+    return null;
+  }
+  const labels = correctText
+    .slice(MULTI_ANSWER_PREFIX.length)
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+  return labels.length > 1 ? Array.from(new Set(labels)).sort() : null;
+}
+
+/**
+ * Extracts selected option UUIDs from `attempt_responses.answer_text` (e.g. "MULTI_IDS:uuid1,uuid2").
+ */
+export function parseMultiSelectedIds(answerText: string | null | undefined): string[] {
+  if (typeof answerText !== "string" || !answerText.startsWith(MULTI_SELECTED_PREFIX)) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      answerText
+        .slice(MULTI_SELECTED_PREFIX.length)
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => isValidUuid(s)),
+    ),
+  );
+}
+
+/**
+ * Extracts one or more option labels from flexible formats:
+ *   - string: "B", "A, C", "A & C", "A; B; D", "A/C", "AC" (when both A and C are in seenLabels)
+ *   - array:  ["A", "C"]
+ */
+function extractCorrectLabels(rawSource: unknown, seenLabels: Set<string>): string[] {
+  const rawTokens: string[] = [];
+
+  if (Array.isArray(rawSource)) {
+    for (const item of rawSource) {
+      if (typeof item === "string" || typeof item === "number") {
+        rawTokens.push(String(item));
+      }
+    }
+  } else if (typeof rawSource === "string") {
+    const trimmed = rawSource.trim();
+    if (trimmed) {
+      // Split on common delimiters: comma, semicolon, ampersand, slash, pipe, "and", whitespace
+      const parts = trimmed.split(/[,;&|/]+|\band\b|\bvà\b|\s+/i).filter(Boolean);
+      if (parts.length > 1) {
+        rawTokens.push(...parts);
+      } else {
+        const cleanSingle = trimmed.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        if (seenLabels.has(cleanSingle)) {
+          rawTokens.push(cleanSingle);
+        } else if (
+          cleanSingle.length > 1 &&
+          cleanSingle.split("").every((ch) => seenLabels.has(ch))
+        ) {
+          // Handle compact notation like "AC" or "ABD" when every letter is a valid option label
+          rawTokens.push(...cleanSingle.split(""));
+        } else if (cleanSingle) {
+          rawTokens.push(cleanSingle);
+        }
+      }
+    }
+  }
+
+  const matched: string[] = [];
+  for (const tok of rawTokens) {
+    const clean = tok.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (clean && seenLabels.has(clean) && !matched.includes(clean)) {
+      matched.push(clean);
+    }
+  }
+  return matched.sort();
 }
 
 export interface ValidatedGeneratedQuiz {
@@ -336,27 +423,38 @@ export function validateGeneratedQuizPayload(
     }
 
     const rawCorrectSource =
-      typeof q.correct_option_label === "string"
+      q.correct_option_labels !== undefined && q.correct_option_labels !== null
+        ? q.correct_option_labels
+        : q.correct_answers !== undefined && q.correct_answers !== null
+        ? q.correct_answers
+        : q.correctAnswers !== undefined && q.correctAnswers !== null
+        ? q.correctAnswers
+        : q.answers !== undefined && q.answers !== null
+        ? q.answers
+        : q.correct_option_label !== undefined && q.correct_option_label !== null
         ? q.correct_option_label
-        : typeof q.answer === "string"
+        : q.answer !== undefined && q.answer !== null
         ? q.answer
-        : typeof q.correct_answer === "string"
+        : q.correct_answer !== undefined && q.correct_answer !== null
         ? q.correct_answer
-        : typeof q.correctAnswer === "string"
+        : q.correctAnswer !== undefined && q.correctAnswer !== null
         ? q.correctAnswer
-        : typeof q.correct === "string"
+        : q.correct !== undefined && q.correct !== null
         ? q.correct
         : "";
 
-    const rawCorrectLabel = rawCorrectSource
-      .trim()
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, "");
+    const matchedCorrectLabels = extractCorrectLabels(rawCorrectSource, seenLabels);
+    const fallbackLabel =
+      typeof q.correct_option_label === "string"
+        ? extractCorrectLabels(q.correct_option_label, seenLabels)
+        : [];
+    const finalCorrectLabels =
+      matchedCorrectLabels.length > 0 ? matchedCorrectLabels : fallbackLabel;
 
-    if (!rawCorrectLabel || !seenLabels.has(rawCorrectLabel)) {
+    if (finalCorrectLabels.length === 0) {
       if (rawQuestions.length === 1) {
         throw new AppError(
-          `Câu hỏi thứ ${i + 1} có đáp án đúng '${rawCorrectLabel}' không khớp với bất kỳ lựa chọn nào (${Array.from(seenLabels).join(", ")}).`,
+          `Câu hỏi thứ ${i + 1} có đáp án đúng không khớp với bất kỳ lựa chọn nào (${Array.from(seenLabels).join(", ")}).`,
           422,
           "AI_MISMATCHED_CORRECT_ANSWER",
         );
@@ -365,14 +463,21 @@ export function validateGeneratedQuizPayload(
       continue;
     }
 
+    const isMultiSelect = finalCorrectLabels.length > 1;
+    const primaryCorrectLabel = finalCorrectLabels[0];
     const matchingOption = validatedOptions.find(
-      (o) => o.option_label === rawCorrectLabel,
+      (o) => o.option_label === primaryCorrectLabel,
     )!;
+    const correctTextValue = isMultiSelect
+      ? `${MULTI_ANSWER_PREFIX}${finalCorrectLabels.join(",")}`
+      : matchingOption.option_content;
 
     const explanation =
       typeof q.explanation === "string" && q.explanation.trim().length > 0
         ? q.explanation.trim()
-        : `Đáp án đúng là ${rawCorrectLabel}: ${matchingOption.option_content}`;
+        : isMultiSelect
+        ? `Các đáp án đúng là ${finalCorrectLabels.join(", ")}.`
+        : `Đáp án đúng là ${primaryCorrectLabel}: ${matchingOption.option_content}`;
 
     const formulaLatex =
       typeof q.formula_latex === "string" && q.formula_latex.trim().length > 0
@@ -397,8 +502,10 @@ export function validateGeneratedQuizPayload(
       question_type: questionType,
       difficulty,
       options: validatedOptions,
-      correct_option_label: rawCorrectLabel,
-      correct_text: matchingOption.option_content,
+      correct_option_label: primaryCorrectLabel,
+      correct_option_labels: finalCorrectLabels,
+      is_multi_select: isMultiSelect,
+      correct_text: correctTextValue,
       explanation,
       formula_latex: formulaLatex,
       image_path: imagePath,

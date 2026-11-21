@@ -17,7 +17,12 @@
 import { handleCorsPreflight } from "../_shared/cors.ts";
 import { AppError, errorResponse, jsonResponse } from "../_shared/response.ts";
 import { requireAuth } from "../_shared/auth.ts";
-import { isValidUuid, requireUuid } from "../_shared/validation.ts";
+import {
+  isValidUuid,
+  MULTI_SELECTED_PREFIX,
+  parseMultiAnswerLabels,
+  requireUuid,
+} from "../_shared/validation.ts";
 
 Deno.serve(async (req: Request) => {
   const preflight = handleCorsPreflight(req);
@@ -45,8 +50,21 @@ Deno.serve(async (req: Request) => {
       "attempt_question_id",
     );
 
+    const hasMultiIds = Array.isArray(payload.selected_option_ids);
+    const selectedOptionIds: string[] = hasMultiIds
+      ? Array.from(
+          new Set(
+            (payload.selected_option_ids as unknown[])
+              .filter((v) => v !== null && v !== undefined && String(v).trim() !== "")
+              .map((v) => requireUuid(v, "selected_option_ids[]")),
+          ),
+        )
+      : [];
+
     const selectedOptionId =
-      payload.selected_option_id === null || payload.selected_option_id === ""
+      payload.selected_option_id === null ||
+      payload.selected_option_id === undefined ||
+      payload.selected_option_id === ""
         ? null
         : requireUuid(payload.selected_option_id, "selected_option_id");
 
@@ -124,19 +142,27 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // 4. Verify selected_option_id belongs to this attempt_question's options_snapshot
-    if (selectedOptionId !== null) {
-      const optionsSnapshot = Array.isArray(attemptQuestion.options_snapshot)
-        ? attemptQuestion.options_snapshot
-        : [];
-      const optionExists = optionsSnapshot.some(
-        (opt: { id?: string }) =>
-          typeof opt?.id === "string" &&
-          isValidUuid(opt.id) &&
-          opt.id.toLowerCase() === selectedOptionId.toLowerCase(),
-      );
+    // 4. Verify selected option(s) belong to this attempt_question's options_snapshot
+    const optionsSnapshot = Array.isArray(attemptQuestion.options_snapshot)
+      ? (attemptQuestion.options_snapshot as Array<{ id?: string; option_label?: string }>)
+      : [];
+    const validOptionIdsSet = new Set(
+      optionsSnapshot
+        .map((opt) => (typeof opt?.id === "string" && isValidUuid(opt.id) ? opt.id.toLowerCase() : ""))
+        .filter(Boolean),
+    );
 
-      if (!optionExists) {
+    const multiCorrectLabels = parseMultiAnswerLabels(answerKey?.correct_text);
+    const isMultiSelect = Boolean(multiCorrectLabels && multiCorrectLabels.length > 1);
+
+    const effectiveSelectedIds = hasMultiIds
+      ? selectedOptionIds
+      : selectedOptionId
+      ? [selectedOptionId]
+      : [];
+
+    for (const optId of effectiveSelectedIds) {
+      if (!validOptionIdsSet.has(optId.toLowerCase())) {
         throw new AppError(
           "Phương án lựa chọn không thuộc câu hỏi này.",
           400,
@@ -144,6 +170,41 @@ Deno.serve(async (req: Request) => {
         );
       }
     }
+
+    // Compute canonical correct option IDs for multi-select questions
+    const correctOptionIds = isMultiSelect
+      ? optionsSnapshot
+          .filter((opt) =>
+            multiCorrectLabels!.includes(String(opt.option_label || "").trim().toUpperCase()),
+          )
+          .map((opt) => String(opt.id))
+          .filter(Boolean)
+      : answerKey?.correct_option_id
+      ? [answerKey.correct_option_id]
+      : [];
+
+    const isMultiExactMatch =
+      isMultiSelect &&
+      effectiveSelectedIds.length === correctOptionIds.length &&
+      correctOptionIds.length > 0 &&
+      correctOptionIds.every((cid) =>
+        effectiveSelectedIds.some((sid) => sid.toLowerCase() === cid.toLowerCase()),
+      );
+
+    // For multi-select: store exact selected UUIDs in `answer_text` with MULTI_IDS: prefix,
+    // and set `selected_option_id` to `answerKey.correct_option_id` ONLY when the entire set matches
+    // so `rpc_submit_attempt` grades multi-select accurately with zero schema changes!
+    const dbSelectedOptionId = isMultiSelect
+      ? isMultiExactMatch
+        ? answerKey?.correct_option_id ?? null
+        : null
+      : selectedOptionId;
+
+    const dbAnswerText = isMultiSelect
+      ? effectiveSelectedIds.length > 0
+        ? `${MULTI_SELECTED_PREFIX}${effectiveSelectedIds.join(",")}`
+        : null
+      : answerText;
 
     // 5. Save or update response in attempt_responses
     const answeredAt = new Date().toISOString();
@@ -153,8 +214,8 @@ Deno.serve(async (req: Request) => {
         {
           attempt_id: attemptId,
           attempt_question_id: attemptQuestionId,
-          selected_option_id: selectedOptionId,
-          answer_text: answerText,
+          selected_option_id: dbSelectedOptionId,
+          answer_text: dbAnswerText,
           answered_at: answeredAt,
         },
         {
@@ -181,10 +242,11 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const isCorrect =
-        selectedOptionId !== null &&
-        answerKey.correct_option_id !== null &&
-        selectedOptionId.toLowerCase() === answerKey.correct_option_id.toLowerCase();
+      const isCorrect = isMultiSelect
+        ? isMultiExactMatch
+        : selectedOptionId !== null &&
+          answerKey.correct_option_id !== null &&
+          selectedOptionId.toLowerCase() === answerKey.correct_option_id.toLowerCase();
 
       return jsonResponse(
         {
@@ -192,11 +254,15 @@ Deno.serve(async (req: Request) => {
           saved: true,
           attempt_id: attemptId,
           attempt_question_id: attemptQuestionId,
-          selected_option_id: selectedOptionId,
+          selected_option_id: dbSelectedOptionId,
+          selected_option_ids: effectiveSelectedIds,
           answered_at: answeredAt,
           feedback: {
             is_correct: isCorrect,
+            is_multi_select: isMultiSelect,
             correct_option_id: answerKey.correct_option_id,
+            correct_option_ids: correctOptionIds,
+            correct_labels: multiCorrectLabels || [],
             correct_text: answerKey.correct_text,
             explanation: answerKey.explanation,
           },
@@ -213,7 +279,8 @@ Deno.serve(async (req: Request) => {
         saved: true,
         attempt_id: attemptId,
         attempt_question_id: attemptQuestionId,
-        selected_option_id: selectedOptionId,
+        selected_option_id: isMultiSelect ? null : selectedOptionId,
+        selected_option_ids: effectiveSelectedIds,
         answered_at: answeredAt,
       },
       200,

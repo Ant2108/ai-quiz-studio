@@ -1176,3 +1176,107 @@ test("Full Extraction Continuation: Automatically extracts remaining questions w
   assert.equal(res.extractedData.questions[0].question_text, "Question 1 about Flutter?");
   assert.equal(res.extractedData.questions[49].question_text, "Question 50 about Flutter?");
 });
+
+test("Multi-Select Answers: Validates array/comma/compact multi-answer formats and encodes canonical MULTI: key", async () => {
+  const {
+    validateGeneratedQuizPayload,
+    parseMultiAnswerLabels,
+    parseMultiSelectedIds,
+  } = await import("../supabase/functions/_shared/validation.ts");
+
+  const payload = [
+    {
+      question: "Choose 2 valid Flutter widgets:",
+      options: { A: "Container", B: "Div", C: "Row", D: "Span" },
+      correct_option_labels: ["C", "A"],
+      explanation: "Container và Row là widget của Flutter.",
+    },
+    {
+      question: "Select two state management options:",
+      options: { A: "Provider", B: "Riverpod", C: "SQL", D: "HTML" },
+      answer: "A, B",
+      explanation: "Provider và Riverpod quản lý state.",
+    },
+    {
+      question: "Single answer control:",
+      options: { A: "Dart", B: "Go" },
+      answer: "A",
+      explanation: "Flutter dùng Dart.",
+    },
+  ];
+
+  const validated = validateGeneratedQuizPayload(payload, "Multi Select Quiz", "medium");
+  assert.equal(validated.questions.length, 3);
+  assert.equal(validated.questions[0].is_multi_select, true);
+  assert.deepEqual(validated.questions[0].correct_option_labels, ["A", "C"]);
+  assert.equal(validated.questions[0].correct_option_label, "A");
+  assert.equal(validated.questions[0].correct_text, "MULTI:A,C");
+  assert.deepEqual(parseMultiAnswerLabels(validated.questions[0].correct_text), ["A", "C"]);
+
+  assert.equal(validated.questions[1].is_multi_select, true);
+  assert.deepEqual(validated.questions[1].correct_option_labels, ["A", "B"]);
+  assert.equal(validated.questions[1].correct_text, "MULTI:A,B");
+
+  assert.equal(validated.questions[2].is_multi_select, false);
+  assert.equal(parseMultiAnswerLabels(validated.questions[2].correct_text), null);
+
+  const u1 = "11111111-1111-4111-8111-111111111111";
+  const u2 = "22222222-2222-4222-8222-222222222222";
+  assert.deepEqual(parseMultiSelectedIds(`MULTI_IDS:${u1},${u2}`), [u1, u2]);
+});
+
+test("Exhaustive Chunked PDF Extraction: Extracts exact 68 questions across 3 chunks without missing or inventing questions", async () => {
+  const long68Text = Array.from(
+    { length: 68 },
+    (_, i) =>
+      `[Trang ${i + 1}] MULTIPLE CHOICE\nQuestion ${i + 1}: Detailed Flutter & Dart exam question text number ${i + 1} with code context.\nA. Option A for Q${i + 1}\nB. Option B for Q${i + 1}\nC. Option C for Q${i + 1}\nD. Option D for Q${i + 1}`,
+  ).join("\n\n");
+
+  let callCount = 0;
+  const res = await analyzeDocumentWithGemini({
+    fileBytes: new TextEncoder().encode(long68Text),
+    fileName: "exam_68.txt",
+    mimeType: "text/plain",
+    ext: "txt",
+    deps: {
+      apiKeyOverride: "fake-key",
+      sleepImpl: async () => {},
+      fetchImpl: async (_url, init) => {
+        callCount++;
+        const body = JSON.parse(String(init?.body || "{}"));
+        const promptText = body.contents[0].parts[0].text || "";
+        if (callCount === 1) {
+          // Pass 1 stops at 20 questions
+          const first20 = Array.from({ length: 20 }, (_, i) => ({
+            ...makeSampleQuizJson(`Question ${i + 1}: Detailed`).questions[0],
+          }));
+          return makeGeminiSuccessPayload({
+            extracted_text: "PROVIDED_IN_TEXT",
+            estimated_pages: 68,
+            title_suggestion: "Exam 68",
+            subject_suggestion: "Flutter",
+            topics: ["Flutter"],
+            summary: "68 questions.",
+            key_concepts: ["Flutter"],
+            recommended_question_count: 68,
+            questions: first20,
+          });
+        }
+        // Chunked extraction: parse every "[Trang N]" inside this chunk
+        const matches = Array.from(promptText.matchAll(/\[Trang (\d+)\]/g)).map((m) => Number(m[1]));
+        const chunkQuestions = matches.map((n) => ({
+          ...makeSampleQuizJson(`Question ${n}: Detailed`).questions[0],
+          ...(n === 10
+            ? { correct_option_label: "A", correct_option_labels: ["A", "C"] }
+            : {}),
+        }));
+        return makeGeminiSuccessPayload({ questions: chunkQuestions });
+      },
+    },
+  });
+
+  assert.equal(res.extractedData.questions.length, 68);
+  assert.equal(res.summary.recommended_question_count, 68);
+  assert.equal(res.extractedData.questions[9].is_multi_select, true);
+  assert.deepEqual(res.extractedData.questions[9].correct_option_labels, ["A", "C"]);
+});

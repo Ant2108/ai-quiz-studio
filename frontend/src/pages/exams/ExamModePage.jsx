@@ -199,6 +199,31 @@ export function ExamModePage() {
     const currentQ = questions[currentIndex];
     const aqId = currentQ.attempt_question_id;
 
+    if (currentQ.is_multi_select) {
+      const prevList = Array.isArray(responses[aqId]) ? responses[aqId] : [];
+      const nextList = prevList.includes(optionId)
+        ? prevList.filter((id) => id !== optionId)
+        : [...prevList, optionId];
+
+      setResponses((prev) => ({
+        ...prev,
+        [aqId]: nextList,
+      }));
+
+      try {
+        await attemptService.answerQuestion({
+          attemptId: attempt.attempt_id,
+          attemptQuestionId: aqId,
+          selectedOptionIds: nextList,
+        });
+      } catch (err) {
+        if (err.code === "ATTEMPT_TIME_EXPIRED") {
+          navigate(`/results/${attempt.attempt_id}`, { replace: true });
+        }
+      }
+      return;
+    }
+
     const nextOptionId = responses[aqId] === optionId ? null : optionId;
 
     setResponses((prev) => ({
@@ -456,7 +481,9 @@ export function ExamModePage() {
   }
 
   const currentQuestion = questions[currentIndex];
-  const answeredCount = Object.values(responses).filter(Boolean).length;
+  const isResponseAnswered = (val) =>
+    Array.isArray(val) ? val.length > 0 : Boolean(val);
+  const answeredCount = Object.values(responses).filter(isResponseAnswered).length;
   const unansweredCount = questions.length - answeredCount;
   const progressPercent = Math.round((answeredCount / questions.length) * 100);
   const isCurrentFlagged =
@@ -500,10 +527,17 @@ export function ExamModePage() {
         {currentQuestion && (
           <Card className="border-slate-200/80 shadow-xs">
             <CardContent className="p-6 sm:p-8 space-y-6">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-bold uppercase text-primary">
-                  Câu hỏi {currentIndex + 1} / {questions.length}
-                </span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold uppercase text-primary">
+                    Câu hỏi {currentIndex + 1} / {questions.length}
+                  </span>
+                  {currentQuestion.is_multi_select && (
+                    <span className="px-2 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-700 text-[11px] font-semibold">
+                      Chọn nhiều đáp án ({currentQuestion.required_answer_count || 2} đáp án)
+                    </span>
+                  )}
+                </div>
 
                 <Button
                   type="button"
@@ -549,8 +583,10 @@ export function ExamModePage() {
 
               <div className="space-y-2.5">
                 {(currentQuestion.options || []).map((opt) => {
-                  const isSelected =
-                    responses[currentQuestion.attempt_question_id] === opt.id;
+                  const currentVal = responses[currentQuestion.attempt_question_id];
+                  const isSelected = Array.isArray(currentVal)
+                    ? currentVal.includes(opt.id)
+                    : currentVal === opt.id;
                   return (
                     <button
                       key={opt.id}
@@ -649,7 +685,7 @@ export function ExamModePage() {
 
             <div className="grid grid-cols-5 sm:grid-cols-8 lg:grid-cols-5 gap-2 max-h-80 overflow-y-auto pr-1">
               {questions.map((q, idx) => {
-                const isAnswered = Boolean(responses[q.attempt_question_id]);
+                const isAnswered = isResponseAnswered(responses[q.attempt_question_id]);
                 const isFlagged = flaggedIds.has(q.attempt_question_id);
                 const isCurrent = idx === currentIndex;
 

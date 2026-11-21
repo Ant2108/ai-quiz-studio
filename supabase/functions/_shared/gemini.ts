@@ -754,15 +754,17 @@ export async function analyzeDocumentWithGemini(params: {
   const systemInstruction =
     "Bạn là chuyên gia phân tích tài liệu giáo dục và OCR chính xác. " +
     "NGUYÊN TẮC BẮT BUỘC:\n" +
-    "1. Chỉ trích xuất và tóm tắt thông tin có thật trong tài liệu nguồn, tuyệt đối không bịa thêm kiến thức ngoài tài liệu.\n" +
+    "1. Chỉ trích xuất và tóm tắt thông tin có thật trong tài liệu nguồn. TUYỆT ĐỐI KHÔNG tự bịa thêm câu hỏi mới ngoài tài liệu nếu tài liệu đã là bộ đề câu hỏi.\n" +
     "2. GIỮ NGUYÊN NGÔN NGỮ GỐC CỦA TÀI LIỆU cho toàn bộ câu hỏi (question_text) và các phương án trả lời (option_content). " +
     "TUYỆT ĐỐI KHÔNG tự động dịch câu hỏi hoặc đáp án sang tiếng Việt nếu tài liệu gốc là tiếng Anh hoặc ngôn ngữ khác.\n" +
-    "3. Riêng trường explanation (giải thích đáp án) viết ngắn gọn, dễ hiểu bằng tiếng Việt (giữ nguyên các thuật ngữ chuyên ngành, tên hàm/class/code gốc).\n" +
-    "4. Trả về duy nhất 1 JSON object hợp lệ theo đúng cấu trúc yêu cầu.";
+    "3. NHẬN DIỆN CÂU HỎI NHIỀU ĐÁP ÁN ĐÚNG (Multi-select): Nếu câu hỏi có nhiều hơn 1 đáp án đúng (ví dụ: Choose 2, Choose 3, Select all that apply, Chọn nhiều đáp án, ô vuông checkbox), " +
+    "PHẢI trả về mảng \"correct_option_labels\": [\"A\", \"C\"] chứa ĐẦY ĐỦ tất cả nhãn đáp án đúng (và \"correct_option_label\" là nhãn đầu tiên).\n" +
+    "4. Riêng trường explanation (giải thích đáp án) viết ngắn gọn, dễ hiểu bằng tiếng Việt (giữ nguyên các thuật ngữ chuyên ngành, tên hàm/class/code gốc).\n" +
+    "5. Trả về duy nhất 1 JSON object hợp lệ theo đúng cấu trúc yêu cầu.";
 
   const analysisPrompt = `Hãy đọc toàn bộ tài liệu "${fileName}" và trả về JSON có cấu trúc theo mẫu sau:
 {
-  "extracted_text": "Toàn bộ nội dung văn bản trích xuất / OCR từ tài liệu (giữ nguyên ngôn ngữ gốc, các định nghĩa, công thức LaTeX nếu có, đánh dấu [Trang X] nếu xác định được trang)",
+  "extracted_text": "Toàn bộ nội dung văn bản trích xuất / OCR từ tài liệu (giữ nguyên ngôn ngữ gốc, mọi hướng dẫn như 'Choose 2' / 'Select all', các định nghĩa, công thức LaTeX nếu có, đánh dấu [Trang X] nếu xác định được trang)",
   "estimated_pages": 1,
   "title_suggestion": "Tên bộ đề gợi ý ngắn gọn sát nội dung",
   "subject_suggestion": "Môn học hoặc lĩnh vực chính",
@@ -782,6 +784,7 @@ export async function analyzeDocumentWithGemini(params: {
         { "option_label": "D", "option_content": "Option D in original document language" }
       ],
       "correct_option_label": "A",
+      "correct_option_labels": ["A"],
       "explanation": "Giải thích ngắn gọn bằng tiếng Việt (giữ nguyên thuật ngữ gốc) vì sao đáp án đúng theo tài liệu nguồn.",
       "formula_latex": null,
       "source_page": 1
@@ -789,8 +792,9 @@ export async function analyzeDocumentWithGemini(params: {
   ]
 }
 Lưu ý cực kỳ quan trọng:
-- Nếu tài liệu gốc đã chứa sẵn danh sách câu hỏi trắc nghiệm (ví dụ 30, 50, 100 câu...), PHẢI trích xuất ĐẦY ĐỦ TẤT CẢ các câu hỏi đó vào mảng "questions" và ghi đúng tổng số câu vào "recommended_question_count". TUYỆT ĐỐI KHÔNG tự cắt ngắn hoặc dừng lại ở 20 câu!
-- Nếu tài liệu là bài giảng/giáo trình, hãy biên soạn bộ câu hỏi bao phủ toàn bộ nội dung tài liệu (đa dạng easy/medium/hard, giữ nguyên ngôn ngữ gốc cho question_text và option_content; riêng explanation giải thích bằng tiếng Việt) vào mảng "questions" để hệ thống lưu JSON và tạo đề trực tiếp không cần gọi AI lần nữa.`;
+- Nếu tài liệu gốc đã chứa sẵn danh sách câu hỏi trắc nghiệm (ví dụ 50, 60, 68 câu...), PHẢI trích xuất CHÍNH XÁC và ĐẦY ĐỦ TẤT CẢ các câu hỏi có trong tài liệu vào mảng "questions" và ghi đúng tổng số câu vào "recommended_question_count". TUYỆT ĐỐI KHÔNG tự cắt ngắn ở 20 câu và TUYỆT ĐỐI KHÔNG tự bịa thêm câu hỏi không có trong tài liệu!
+- Nếu câu hỏi có NHIỀU đáp án đúng (Choose 2, Select all that apply, v.v.), PHẢI điền đầy đủ mảng "correct_option_labels" (ví dụ ["A", "C"]).
+- Nếu tài liệu là bài giảng/giáo trình, hãy biên soạn bộ câu hỏi bao phủ toàn bộ nội dung tài liệu vào mảng "questions".`;
 
   const parts: Array<Record<string, unknown>> = [];
   let uploadedGeminiFileName: string | null = null;
@@ -918,85 +922,199 @@ Lưu ý cực kỳ quan trọng:
     }
   }
 
-  // Continuation pass: if the document has more questions than Pass 1 extracted (e.g. 50-question PDF
-  // where Pass 1 stopped at 20), extract the remaining questions from `finalExtractedText` (text-only,
-  // no re-upload, reusing the winning model) so the Question Bank is complete in a single document conversion.
+  // Exhaustive Chunked Extraction:
+  // Prevents Gemini from stopping at 20 questions, missing middle pages, or inventing extra questions.
+  // - For long documents (> 6,000 chars): splits `finalExtractedText` into non-overlapping 6,000-char
+  //   chunks and extracts EVERY chunk in parallel (concurrency = 3), preserving exact order & multi-select keys.
+  // - For shorter multi-question documents where Pass 1 stopped early (e.g. 20/50): runs a single
+  //   continuation pass to capture the remaining questions without duplicating Pass 1.
+  const CHUNK_EXTRACTION_CHARS = 6_000;
+  const MAX_EXTRACTION_CHUNKS = 10;
   const targetQuestionCount = Math.min(500, summary.recommended_question_count);
+  const extractionChunks =
+    finalExtractedText.length >= 200
+      ? chunkDocumentText(finalExtractedText, CHUNK_EXTRACTION_CHARS).slice(0, MAX_EXTRACTION_CHUNKS)
+      : [];
+
   if (
-    finalExtractedText.length >= 200 &&
+    extractionChunks.length >= 2 &&
+    (validatedBankQuestions.length === 0 ||
+      validatedBankQuestions.length < targetQuestionCount ||
+      finalExtractedText.length > CHUNK_EXTRACTION_CHARS)
+  ) {
+    const chunkResults: ValidatedGeneratedQuestion[][] = new Array(extractionChunks.length)
+      .fill(null)
+      .map(() => []);
+    const CONCURRENCY = 3;
+
+    for (let start = 0; start < extractionChunks.length; start += CONCURRENCY) {
+      const batchIndices = Array.from(
+        { length: Math.min(CONCURRENCY, extractionChunks.length - start) },
+        (_, offset) => start + offset,
+      );
+
+      await Promise.all(
+        batchIndices.map(async (chunkIdx) => {
+          const chunkText = extractionChunks[chunkIdx];
+          const chunkPrompt = `Đây là PHẦN ${chunkIdx + 1}/${extractionChunks.length} của tài liệu "${fileName}".
+Hãy trích xuất CHÍNH XÁC và ĐẦY ĐỦ TẤT CẢ các câu hỏi trắc nghiệm có trong ĐOẠN VĂN BẢN BÊN DƯỚI theo đúng thứ tự xuất hiện.
+
+QUY TẮC BẮT BUỘC:
+1. CHỈ trích xuất các câu hỏi CÓ THẬT trong đoạn văn bản này. TUYỆT ĐỐI KHÔNG tự bịa thêm câu hỏi mới ngoài văn bản và TUYỆT ĐỐI KHÔNG bỏ sót câu nào.
+2. GIỮ NGUYÊN ngôn ngữ gốc của tài liệu cho "question_text" và "option_content" (không tự dịch sang tiếng Việt).
+3. Nếu câu hỏi có NHIỀU ĐÁP ÁN ĐÚNG (ví dụ: Choose 2, Choose 3, Select all that apply, Chọn 2 đáp án, v.v.), PHẢI điền đầy đủ mảng "correct_option_labels" (ví dụ ["A", "C"]) và "correct_option_label" là nhãn đầu tiên.
+4. Riêng "explanation" giải thích ngắn gọn bằng tiếng Việt (giữ nguyên thuật ngữ/code gốc).
+5. Trả về đúng JSON:
+{
+  "questions": [
+    {
+      "question_text": "...",
+      "question_type": "multiple_choice",
+      "difficulty": "medium",
+      "options": [
+        { "option_label": "A", "option_content": "..." },
+        { "option_label": "B", "option_content": "..." },
+        { "option_label": "C", "option_content": "..." },
+        { "option_label": "D", "option_content": "..." }
+      ],
+      "correct_option_label": "A",
+      "correct_option_labels": ["A"],
+      "explanation": "...",
+      "formula_latex": null,
+      "source_page": 1
+    }
+  ]
+}
+
+NỘI DUNG PHẦN ${chunkIdx + 1}/${extractionChunks.length}:
+"""
+${chunkText}
+"""`;
+
+          try {
+            const chunkRes = await callGeminiGenerateContent({
+              parts: [{ text: chunkPrompt }],
+              systemInstruction,
+              responseMimeType: "application/json",
+              temperature: 0.1,
+              maxOutputTokens: 65536,
+              disableThinking: true,
+              requiredInput: "json_output",
+              deps: {
+                ...deps,
+                preferredModelId: aiMeta.model_id,
+              },
+            });
+            aiMeta = chunkRes.meta;
+
+            const chunkParsed = parseGeminiJson(chunkRes.text) as Record<string, unknown>;
+            const chunkValidated = validateGeneratedQuizPayload(
+              chunkParsed,
+              summary.title_suggestion,
+              "medium",
+            );
+            chunkResults[chunkIdx] = chunkValidated.questions;
+          } catch {
+            chunkResults[chunkIdx] = [];
+          }
+        }),
+      );
+    }
+
+    const mergedFromChunks: ValidatedGeneratedQuestion[] = [];
+    const seenChunkTexts = new Set<string>();
+    for (const list of chunkResults) {
+      for (const q of list) {
+        const norm = q.question_text.toLowerCase().trim();
+        if (!seenChunkTexts.has(norm)) {
+          seenChunkTexts.add(norm);
+          mergedFromChunks.push(q);
+        }
+      }
+    }
+
+    // Use exhaustive chunked extraction whenever it captured at least as many questions as Pass 1
+    if (mergedFromChunks.length >= validatedBankQuestions.length && mergedFromChunks.length > 0) {
+      validatedBankQuestions = mergedFromChunks;
+    } else if (mergedFromChunks.length > 0) {
+      const seenExisting = new Set(
+        validatedBankQuestions.map((q) => q.question_text.toLowerCase().trim()),
+      );
+      for (const q of mergedFromChunks) {
+        const norm = q.question_text.toLowerCase().trim();
+        if (!seenExisting.has(norm)) {
+          seenExisting.add(norm);
+          validatedBankQuestions.push(q);
+        }
+      }
+    }
+  } else if (
+    extractionChunks.length === 1 &&
     validatedBankQuestions.length > 0 &&
     validatedBankQuestions.length < targetQuestionCount
   ) {
     const seenTexts = new Set(
       validatedBankQuestions.map((q) => q.question_text.toLowerCase().trim()),
     );
-    const maxContinuationPasses = 3;
-    const textChunks = chunkDocumentText(finalExtractedText, MAX_CHUNK_CHARS);
-    const fullContext = textChunks.slice(0, 3).join("\n\n---\n\n");
+    const remainingNeeded = targetQuestionCount - validatedBankQuestions.length;
+    const alreadyExtractedList = validatedBankQuestions
+      .map((q, idx) => `${idx + 1}. ${q.question_text}`)
+      .join("\n");
 
-    for (let pass = 0; pass < maxContinuationPasses; pass++) {
-      const remainingNeeded = targetQuestionCount - validatedBankQuestions.length;
-      if (remainingNeeded <= 0) break;
-
-      const batchTarget = Math.min(50, remainingNeeded);
-      const alreadyExtractedList = validatedBankQuestions
-        .map((q, idx) => `${idx + 1}. ${q.question_text}`)
-        .join("\n");
-
-      const continuationPrompt = `Tài liệu "${fileName}" có tổng cộng khoảng ${targetQuestionCount} câu hỏi, nhưng mới trích xuất được ${validatedBankQuestions.length} câu.
-Hãy trích xuất TIẾP ${batchTarget} câu hỏi CÒN LẠI (từ câu tiếp theo trở đi, KHÔNG lặp lại các câu đã có bên dưới) từ NỘI DUNG TÀI LIỆU.
+    const continuationPrompt = `Tài liệu "${fileName}" có khoảng ${targetQuestionCount} câu hỏi, nhưng mới trích xuất được ${validatedBankQuestions.length} câu.
+Hãy trích xuất TIẾP các câu hỏi CÒN LẠI (tối đa ${Math.min(50, remainingNeeded)} câu CÓ THẬT trong tài liệu, KHÔNG tự bịa thêm câu mới, KHÔNG lặp lại các câu đã có bên dưới).
 
 QUY TẮC BẮT BUỘC:
 - GIỮ NGUYÊN ngôn ngữ gốc của tài liệu cho "question_text" và "option_content" (không tự dịch sang tiếng Việt).
+- Nếu câu hỏi có NHIỀU đáp án đúng (Choose 2, Select all...), PHẢI điền đầy đủ mảng "correct_option_labels" (ví dụ ["A", "C"]).
 - Riêng "explanation" giải thích ngắn gọn bằng tiếng Việt (giữ nguyên thuật ngữ/code gốc).
-- Trả về đúng JSON: { "questions": [ { "question_text": "...", "question_type": "multiple_choice", "difficulty": "medium", "options": [ { "option_label": "A", "option_content": "..." }, ... ], "correct_option_label": "A", "explanation": "...", "formula_latex": null, "source_page": 1 } ] }
+- Trả về đúng JSON: { "questions": [ { "question_text": "...", "question_type": "multiple_choice", "difficulty": "medium", "options": [ { "option_label": "A", "option_content": "..." }, ... ], "correct_option_label": "A", "correct_option_labels": ["A"], "explanation": "...", "formula_latex": null, "source_page": 1 } ] }
 
 DANH SÁCH CÂU HỎI ĐÃ TRÍCH XUẤT (BỎ QUA CÁC CÂU NÀY):
 ${alreadyExtractedList}
 
 NỘI DUNG TÀI LIỆU:
 """
-${fullContext}
+${extractionChunks[0]}
 """`;
 
-      try {
-        const contRes = await callGeminiGenerateContent({
-          parts: [{ text: continuationPrompt }],
-          systemInstruction,
-          responseMimeType: "application/json",
-          temperature: 0.1,
-          maxOutputTokens: 65536,
-          disableThinking: true,
-          requiredInput: "json_output",
-          deps: {
-            ...deps,
-            preferredModelId: aiMeta.model_id,
-          },
-        });
-        aiMeta = contRes.meta;
+    try {
+      const contRes = await callGeminiGenerateContent({
+        parts: [{ text: continuationPrompt }],
+        systemInstruction,
+        responseMimeType: "application/json",
+        temperature: 0.1,
+        maxOutputTokens: 65536,
+        disableThinking: true,
+        requiredInput: "json_output",
+        deps: {
+          ...deps,
+          preferredModelId: aiMeta.model_id,
+        },
+      });
+      aiMeta = contRes.meta;
 
-        const contParsed = parseGeminiJson(contRes.text) as Record<string, unknown>;
-        const contValidated = validateGeneratedQuizPayload(
-          contParsed,
-          summary.title_suggestion,
-          "medium",
-        );
+      const contParsed = parseGeminiJson(contRes.text) as Record<string, unknown>;
+      const contValidated = validateGeneratedQuizPayload(
+        contParsed,
+        summary.title_suggestion,
+        "medium",
+      );
 
-        let addedInPass = 0;
-        for (const q of contValidated.questions) {
-          const norm = q.question_text.toLowerCase().trim();
-          if (!seenTexts.has(norm)) {
-            seenTexts.add(norm);
-            validatedBankQuestions.push(q);
-            addedInPass++;
-          }
+      for (const q of contValidated.questions) {
+        const norm = q.question_text.toLowerCase().trim();
+        if (!seenTexts.has(norm)) {
+          seenTexts.add(norm);
+          validatedBankQuestions.push(q);
         }
-        if (addedInPass === 0) break;
-      } catch {
-        // Keep whatever Pass 1 + prior passes already extracted cleanly
-        break;
       }
+    } catch {
+      // Keep Pass 1 questions
     }
+  }
+
+  if (validatedBankQuestions.length > 0) {
+    summary.recommended_question_count = Math.min(500, validatedBankQuestions.length);
   }
 
   return {

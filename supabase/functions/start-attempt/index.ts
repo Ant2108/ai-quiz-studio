@@ -15,7 +15,7 @@
 import { handleCorsPreflight } from "../_shared/cors.ts";
 import { AppError, errorResponse, jsonResponse } from "../_shared/response.ts";
 import { requireAuth } from "../_shared/auth.ts";
-import { requireUuid } from "../_shared/validation.ts";
+import { requireUuid, parseMultiAnswerLabels } from "../_shared/validation.ts";
 
 Deno.serve(async (req: Request) => {
   const preflight = handleCorsPreflight(req);
@@ -151,10 +151,17 @@ Deno.serve(async (req: Request) => {
 
     let studyAnswerKeys: Record<
       string,
-      { correct_option_id: string | null; correct_text: string | null; explanation: string | null }
+      {
+        correct_option_id: string | null;
+        correct_option_ids: string[];
+        correct_labels: string[];
+        is_multi_select: boolean;
+        correct_text: string | null;
+        explanation: string | null;
+      }
     > | null = null;
 
-    if (rawAttemptType === "study" && questions.length > 0) {
+    if (questions.length > 0) {
       const aqIds = questions
         .map((q: { attempt_question_id?: string }) => q.attempt_question_id)
         .filter(Boolean);
@@ -165,11 +172,43 @@ Deno.serve(async (req: Request) => {
           .select("attempt_question_id, correct_option_id, correct_text, explanation")
           .in("attempt_question_id", aqIds);
 
-        if (Array.isArray(keyRows)) {
+        const keyMap = new Map<
+          string,
+          { correct_option_id: string | null; correct_text: string | null; explanation: string | null }
+        >();
+        for (const row of keyRows || []) {
+          keyMap.set(row.attempt_question_id, row);
+        }
+
+        if (rawAttemptType === "study") {
           studyAnswerKeys = {};
-          for (const row of keyRows) {
-            studyAnswerKeys[row.attempt_question_id] = {
+        }
+
+        for (const q of questions) {
+          const row = keyMap.get(q.attempt_question_id);
+          const multiLabels = parseMultiAnswerLabels(row?.correct_text);
+          const isMulti = Boolean(multiLabels && multiLabels.length > 1);
+          q.is_multi_select = isMulti;
+          q.required_answer_count = isMulti ? multiLabels!.length : 1;
+
+          if (rawAttemptType === "study" && row && studyAnswerKeys) {
+            const opts = Array.isArray(q.options) ? q.options : [];
+            const correctOptionIds = isMulti
+              ? opts
+                  .filter((o: { option_label?: string }) =>
+                    multiLabels!.includes(String(o.option_label || "").trim().toUpperCase()),
+                  )
+                  .map((o: { id?: string }) => String(o.id))
+                  .filter(Boolean)
+              : row.correct_option_id
+              ? [row.correct_option_id]
+              : [];
+
+            studyAnswerKeys[q.attempt_question_id] = {
               correct_option_id: row.correct_option_id,
+              correct_option_ids: correctOptionIds,
+              correct_labels: isMulti ? multiLabels! : [],
+              is_multi_select: isMulti,
               correct_text: row.correct_text,
               explanation: row.explanation,
             };

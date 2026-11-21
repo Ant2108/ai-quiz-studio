@@ -127,9 +127,72 @@ export function StudyModePage() {
     }
   };
 
+  const isMultiSelectCurrent = Boolean(currentQuestion?.is_multi_select);
+  const currentSelectedList = Array.isArray(currentSelected)
+    ? currentSelected
+    : currentSelected
+    ? [currentSelected]
+    : [];
+
+  const submitMultiSelectCheck = async (aqId, chosenIds) => {
+    if (!attempt || !currentQuestion || checkingOption) return;
+    if (!Array.isArray(chosenIds) || chosenIds.length === 0) return;
+
+    const knownKey = knownKeysMap[aqId];
+    if (knownKey && Array.isArray(knownKey.correct_option_ids) && knownKey.correct_option_ids.length > 0) {
+      const correctIds = knownKey.correct_option_ids;
+      const isCorrect =
+        chosenIds.length === correctIds.length &&
+        correctIds.every((cid) =>
+          chosenIds.some((sid) => sid.toLowerCase() === cid.toLowerCase()),
+        );
+      applyFeedbackResult(aqId, {
+        ...knownKey,
+        is_correct: isCorrect,
+      });
+      attemptService
+        .answerQuestion({
+          attemptId: attempt.attempt_id,
+          attemptQuestionId: aqId,
+          selectedOptionIds: chosenIds,
+        })
+        .catch(() => {});
+      return;
+    }
+
+    setCheckingOption(true);
+    try {
+      const res = await attemptService.answerQuestion({
+        attemptId: attempt.attempt_id,
+        attemptQuestionId: aqId,
+        selectedOptionIds: chosenIds,
+      });
+      if (res?.feedback) {
+        applyFeedbackResult(aqId, res.feedback);
+      }
+    } catch (err) {
+      toast.error(err.message || "Không thể kiểm tra đáp án.");
+    } finally {
+      setCheckingOption(false);
+    }
+  };
+
   const handleSelectOption = async (optionId) => {
     if (!attempt || !currentQuestion || checkingOption) return;
     const aqId = currentQuestion.attempt_question_id;
+
+    if (currentQuestion.is_multi_select) {
+      if (feedbackMap[aqId]) return; // Use "Làm lại câu này ngay" to retry after checking
+      setSelectedOptions((prev) => {
+        const prevList = Array.isArray(prev[aqId]) ? prev[aqId] : [];
+        const exists = prevList.includes(optionId);
+        const nextList = exists
+          ? prevList.filter((id) => id !== optionId)
+          : [...prevList, optionId];
+        return { ...prev, [aqId]: nextList };
+      });
+      return;
+    }
 
     setSelectedOptions((prev) => ({
       ...prev,
@@ -445,9 +508,19 @@ export function StudyModePage() {
           <CardContent className="p-6 sm:p-8 space-y-6">
             <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-[#333836]">
-                  Câu hỏi #{safeIndex + 1}
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-[#333836]">
+                    Câu hỏi #{safeIndex + 1}
+                  </span>
+                  {isMultiSelectCurrent && (
+                    <Badge
+                      variant="outline"
+                      className="bg-indigo-50 text-indigo-700 border-indigo-200 rounded-md text-[11px]"
+                    >
+                      Chọn nhiều đáp án ({currentQuestion.required_answer_count || 2} đáp án đúng)
+                    </Badge>
+                  )}
+                </div>
                 <Button
                   type="button"
                   variant={isCurrentUnlearned ? "secondary" : "ghost"}
@@ -493,14 +566,22 @@ export function StudyModePage() {
 
           <div className="space-y-2.5">
             {(currentQuestion.options || []).map((opt) => {
-              const isSelected = currentSelected === opt.id;
-              const isCorrectOption =
+              const isSelected = currentSelectedList.includes(opt.id);
+              const correctIdsList =
                 currentFeedback &&
-                currentFeedback.correct_option_id &&
-                currentFeedback.correct_option_id.toLowerCase() ===
-                  opt.id.toLowerCase();
+                Array.isArray(currentFeedback.correct_option_ids) &&
+                currentFeedback.correct_option_ids.length > 0
+                  ? currentFeedback.correct_option_ids
+                  : currentFeedback?.correct_option_id
+                  ? [currentFeedback.correct_option_id]
+                  : [];
+              const isCorrectOption =
+                Boolean(currentFeedback) &&
+                correctIdsList.some(
+                  (cid) => cid.toLowerCase() === opt.id.toLowerCase(),
+                );
               const isWrongSelected =
-                currentFeedback && isSelected && !currentFeedback.is_correct;
+                Boolean(currentFeedback) && isSelected && !isCorrectOption;
 
               let optionStyle =
                 "border-slate-200 hover:border-[#333836]/20 hover:bg-[#B0FDE0]/35 bg-white";
@@ -550,10 +631,35 @@ export function StudyModePage() {
                   {currentFeedback && isWrongSelected && (
                     <XCircle className="size-5 text-rose-600 shrink-0 mt-0.5" />
                   )}
+                  {!currentFeedback && isMultiSelectCurrent && isSelected && (
+                    <CheckCircle2 className="size-5 text-[#333836] shrink-0 mt-0.5" />
+                  )}
                 </button>
               );
             })}
           </div>
+
+          {isMultiSelectCurrent && !currentFeedback && (
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <span className="text-xs text-slate-500">
+                Đã chọn {currentSelectedList.length} / {currentQuestion.required_answer_count || 2} phương án
+              </span>
+              <Button
+                type="button"
+                disabled={checkingOption || currentSelectedList.length === 0}
+                onClick={() =>
+                  submitMultiSelectCheck(
+                    currentQuestion.attempt_question_id,
+                    currentSelectedList,
+                  )
+                }
+                className="bg-[#333836] hover:bg-[#262a28] text-[#B0FDE0] font-semibold"
+              >
+                <CheckCheck className="size-4" />
+                <span>Kiểm tra đáp án</span>
+              </Button>
+            </div>
+          )}
 
           {checkingOption && (
             <div className="flex items-center gap-2 text-xs font-medium text-primary">
