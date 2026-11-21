@@ -154,7 +154,7 @@ export function DocumentsPage() {
           </>
         }
         title="Quản lý & Tải lên Tài liệu"
-        description="Hỗ trợ PDF, DOCX, TXT và hình ảnh (PNG, JPG, WEBP — tối đa 20MB). Tài liệu gốc được lưu riêng tư tuyệt đối."
+        description="Hỗ trợ PDF, DOCX, TXT, JSON (tạo thẳng không qua Gemini) và hình ảnh (PNG, JPG, WEBP — tối đa 20MB)."
       />
 
       {/* Upload Zone Card */}
@@ -187,7 +187,7 @@ export function DocumentsPage() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".pdf,.docx,.txt,.png,.jpg,.jpeg,.webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,image/png,image/jpeg,image/webp"
+                accept=".pdf,.docx,.txt,.json,.png,.jpg,.jpeg,.webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,application/json,image/png,image/jpeg,image/webp"
                 className="hidden"
                 onChange={(e) => handleFileSelect(e.target.files?.[0])}
               />
@@ -211,7 +211,7 @@ export function DocumentsPage() {
                     Kéo thả tài liệu vào đây hoặc nhấn để chọn file
                   </p>
                   <p className="text-xs text-slate-500">
-                    Định dạng: PDF, DOCX, TXT, PNG, JPG, WEBP (Tối đa 20MB)
+                    Định dạng: PDF, DOCX, TXT, JSON, PNG, JPG, WEBP (Tối đa 20MB)
                   </p>
                 </div>
               )}

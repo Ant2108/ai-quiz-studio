@@ -165,6 +165,91 @@ export async function processOrRecoverDocument(params: {
     });
   }
 
+  // Direct JSON Import Fast-Path: bypass Gemini AI completely when uploading a .json file
+  if (normalizedExt === "json") {
+    const rawJsonText = hasClientText
+      ? clientExtractedText!.trim()
+      : new TextDecoder("utf-8", { fatal: false }).decode(fileBytes).trim();
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(rawJsonText);
+    } catch {
+      throw new AppError(
+        "File JSON không hợp lệ. Vui lòng kiểm tra lại cú pháp JSON.",
+        400,
+        "INVALID_JSON_FILE",
+      );
+    }
+
+    const fallbackTitle = doc.file_name.replace(/\.[^.]+$/, "");
+    const validated = validateGeneratedQuizPayload(parsedJson, fallbackTitle, "medium");
+    const obj =
+      parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)
+        ? (parsedJson as Record<string, unknown>)
+        : {};
+
+    const jsonSummary = {
+      title_suggestion: validated.title || fallbackTitle,
+      subject_suggestion:
+        typeof obj.subject === "string" && obj.subject.trim()
+          ? obj.subject.trim()
+          : typeof obj.subject_suggestion === "string" && obj.subject_suggestion.trim()
+          ? obj.subject_suggestion.trim()
+          : "Tổng hợp",
+      topics: Array.isArray(obj.topics) ? obj.topics.map(String).slice(0, 10) : [],
+      summary:
+        typeof obj.description === "string" && obj.description.trim()
+          ? obj.description.trim()
+          : `Nhập trực tiếp ${validated.questions.length} câu hỏi từ file JSON (không qua Gemini).`,
+      key_concepts: [],
+      recommended_question_count: Math.min(500, Math.max(1, validated.questions.length)),
+    };
+
+    const jsonExtractedData = {
+      schema_version: 1,
+      ...jsonSummary,
+      extracted_text: rawJsonText,
+      questions: validated.questions,
+    };
+
+    await repo.saveExtractedCheckpoint({
+      documentId: doc.id,
+      mimeType: normalizedMime,
+      fileSize: actualFileSize || rawJsonText.length,
+      pageCount: 1,
+      extractedText: rawJsonText,
+      summary: jsonSummary,
+      extractedData: jsonExtractedData,
+    });
+
+    const syncRes = await repo.syncQuestionBank({
+      documentId: doc.id,
+      userId: actorUserId,
+      questions: validated.questions,
+      replace: forceReanalyze,
+    });
+
+    const updatedDoc = await repo.markDocumentProcessed(doc.id);
+
+    return {
+      document: updatedDoc,
+      extractedLength: rawJsonText.length,
+      summary: jsonSummary,
+      syncedQuestions: syncRes.synced_count,
+      recoveredWithoutGemini: false,
+      aiMeta: {
+        model_id: "direct-json",
+        model_name: "JSON Direct Import (0 Gemini calls)",
+        fallback_triggered: false,
+        status_messages: [
+          `Đã nhập trực tiếp ${syncRes.synced_count} câu hỏi từ JSON (không qua Gemini).`,
+        ],
+        attempts: [],
+      },
+    };
+  }
+
   const analysis = await analyzeDocumentWithGemini({
     fileBytes,
     fileName: doc.file_name,

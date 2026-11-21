@@ -893,3 +893,113 @@ test("Database-only Quiz Generation: Creates quiz from Normalized Question Bank 
   assert.equal(result.quizSetId, "quiz-from-bank-1");
   assert.equal(result.aiMeta.model_id, "database-bank");
 });
+
+test("Direct JSON Import: Bypasses Gemini completely in both processOrRecoverDocument and quizService.generateQuizFromJson", async () => {
+  let geminiCalls = 0;
+  let savedExtracted = null;
+  let syncedCount = 0;
+
+  const jsonPayload = {
+    title: "Direct JSON Quiz",
+    subject: "Software Engineering",
+    questions: makeSampleQuizJson("What is idempotency?").questions,
+  };
+
+  // 1. Upload .json via processOrRecoverDocument -> 0 Gemini calls
+  const docRes = await processOrRecoverDocument({
+    doc: {
+      id: "doc-json-1",
+      user_id: "user-1",
+      file_name: "questions.json",
+      file_path: "user-1/questions.json",
+      file_type: "json",
+      mime_type: "application/json",
+      file_size: 256,
+    },
+    actorUserId: "user-1",
+    repo: {
+      async downloadStorageFile() {
+        return {
+          bytes: new TextEncoder().encode(JSON.stringify(jsonPayload)),
+          mimeType: "application/json",
+        };
+      },
+      async saveExtractedCheckpoint(cp) {
+        savedExtracted = cp.extractedData;
+      },
+      async syncQuestionBank(sync) {
+        syncedCount = sync.questions.length;
+        return { synced_count: syncedCount, already_synced: false };
+      },
+      async markDocumentProcessed(docId) {
+        return { id: docId, status: "processed", question_bank_synced: true };
+      },
+      async markDocumentFailed() {},
+    },
+    geminiDeps: {
+      apiKeyOverride: "fake-key",
+      fetchImpl: async () => {
+        geminiCalls++;
+        throw new Error("Gemini MUST NOT be called for .json files!");
+      },
+    },
+  });
+
+  assert.equal(geminiCalls, 0);
+  assert.equal(syncedCount, 1);
+  assert.equal(savedExtracted.questions.length, 1);
+  assert.equal(docRes.aiMeta.model_id, "direct-json");
+
+  // 2. quizService.generateQuizFromJson -> calls generate-quiz with json_payload (0 Gemini)
+  const originalFetch = globalThis.fetch;
+  let activeFetchImpl = originalFetch;
+  globalThis.fetch = (...args) => activeFetchImpl(...args);
+
+  const { supabase } = await import("../frontend/src/services/supabaseClient.js");
+  const { quizService } = await import("../frontend/src/services/quizService.js");
+  const originalGetSession = supabase.auth.getSession.bind(supabase.auth);
+  supabase.auth.getSession = async () => ({
+    data: { session: { access_token: "test-jwt-token" } },
+    error: null,
+  });
+
+  try {
+    const sentBodies = [];
+    activeFetchImpl = async (url, init = {}) => {
+      if (String(url).includes("/functions/v1/generate-quiz")) {
+        const body = JSON.parse(String(init.body || "{}"));
+        sentBodies.push(body);
+        return makeJsonResponse(201, {
+          success: true,
+          quiz_set: { id: "quiz-direct-json-1", title: body.title },
+          question_count: body.json_payload.questions.length,
+          preview_questions: body.json_payload.questions,
+          source: "direct_json",
+          ai_meta: {
+            model_id: "direct-json",
+            model_name: "JSON Direct Import (0 Gemini calls)",
+            fallback_triggered: false,
+            status_messages: [],
+          },
+        });
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    };
+
+    const res = await quizService.generateQuizFromJson({
+      jsonPayload,
+      title: "Direct JSON Quiz",
+      subject: "SE",
+      difficulty: "medium",
+    });
+
+    assert.equal(sentBodies.length, 1);
+    assert.equal(sentBodies[0].document_id, null);
+    assert.equal(sentBodies[0].json_payload.questions.length, 1);
+    assert.equal(res.source, "direct_json");
+    assert.equal(res.quiz_set.id, "quiz-direct-json-1");
+  } finally {
+    supabase.auth.getSession = originalGetSession;
+    globalThis.fetch = originalFetch;
+  }
+});

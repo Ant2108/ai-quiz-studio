@@ -75,6 +75,27 @@ export function useQuiz() {
     }
   }, []);
 
+  const generateQuizFromJson = useCallback(async (params) => {
+    setGenerating(true);
+    setGenerateProgress({
+      step: "starting",
+      percent: 10,
+      message: "Đang kiểm định JSON & tạo đề trực tiếp (0 Gemini calls)...",
+    });
+    setError(null);
+    try {
+      return await quizService.generateQuizFromJson({
+        ...params,
+        onProgress: (info) => setGenerateProgress(info),
+      });
+    } catch (err) {
+      setError(err.message || "Lỗi tạo bộ đề từ JSON.");
+      throw err;
+    } finally {
+      setGenerating(false);
+    }
+  }, []);
+
   return {
     quizzes,
     currentQuiz,
@@ -86,6 +107,7 @@ export function useQuiz() {
     fetchMyQuizzes,
     fetchQuizDetail,
     generateQuiz,
+    generateQuizFromJson,
     createManualQuiz: quizService.createManualQuiz,
     getQuizForEditor: quizService.getQuizForEditor,
     updateQuizAndQuestions: quizService.updateQuizAndQuestions,

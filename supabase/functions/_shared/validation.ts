@@ -26,6 +26,7 @@ export const ALLOWED_DOCUMENT_MIMES = new Set([
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "text/plain",
+  "application/json",
   "image/png",
   "image/jpeg",
   "image/webp",
@@ -35,6 +36,7 @@ export const ALLOWED_DOCUMENT_EXTENSIONS = new Set([
   "pdf",
   "docx",
   "txt",
+  "json",
   "png",
   "jpg",
   "jpeg",
@@ -68,7 +70,7 @@ export function validateDocumentFile(params: {
 
   if (!normalizedExt) {
     throw new AppError(
-      "Định dạng file không được hỗ trợ. Chỉ chấp nhận PDF, DOCX, TXT, PNG, JPG, WEBP.",
+      "Định dạng file không được hỗ trợ. Chỉ chấp nhận PDF, DOCX, TXT, JSON, PNG, JPG, WEBP.",
       400,
       "UNSUPPORTED_FILE_FORMAT",
     );
@@ -78,6 +80,7 @@ export function validateDocumentFile(params: {
     pdf: "application/pdf",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     txt: "text/plain",
+    json: "application/json",
     png: "image/png",
     jpg: "image/jpeg",
     jpeg: "image/jpeg",

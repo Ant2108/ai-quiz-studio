@@ -178,6 +178,117 @@ export const quizService = {
   },
 
   /**
+   * Creates a quiz set directly from structured JSON (array of questions or { title, questions })
+   * WITHOUT calling Gemini AI. Splits large imports (> 100 questions) cleanly into batches with rollback on error.
+   */
+  async generateQuizFromJson({
+    jsonPayload,
+    documentId = null,
+    title,
+    description,
+    subject,
+    topic,
+    difficulty = "medium",
+    defaultExamQuestions = 60,
+    defaultExamDuration = 60,
+    onProgress = () => {},
+  }) {
+    const rawQuestions = Array.isArray(jsonPayload)
+      ? jsonPayload
+      : Array.isArray(jsonPayload?.questions)
+      ? jsonPayload.questions
+      : [];
+
+    if (rawQuestions.length === 0) {
+      throw new Error("JSON phải chứa mảng câu hỏi 'questions' hợp lệ (ít nhất 1 câu).");
+    }
+    if (rawQuestions.length > 500) {
+      throw new Error("Mỗi bộ đề hỗ trợ tối đa 500 câu hỏi.");
+    }
+
+    const total = rawQuestions.length;
+    const CHUNK_SIZE = 100;
+    const chunks = [];
+    for (let i = 0; i < total; i += CHUNK_SIZE) {
+      chunks.push(rawQuestions.slice(i, i + CHUNK_SIZE));
+    }
+
+    let quizSet = null;
+    let allPreviewQuestions = [];
+    let lastAiMeta = null;
+
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const percent = Math.round(((i * CHUNK_SIZE) / total) * 85) + 10;
+        onProgress({
+          step: "generating",
+          percent,
+          completedQuestions: allPreviewQuestions.length,
+          totalQuestions: total,
+          batchIndex: i,
+          totalBatches: chunks.length,
+          modelName: "JSON Direct Import",
+          message: `Đang lưu trực tiếp ${total} câu hỏi từ JSON (không qua Gemini)...`,
+        });
+
+        const payloadObj = Array.isArray(jsonPayload)
+          ? { title: title || "Bộ đề từ JSON", questions: chunk }
+          : { ...jsonPayload, questions: chunk };
+
+        const batchResponse = await invokeEdgeFunction("generate-quiz", {
+          document_id: documentId || null,
+          quiz_set_id: quizSet?.id || null,
+          json_payload: payloadObj,
+          title: title || jsonPayload?.title || "Bộ đề từ JSON",
+          description: description || jsonPayload?.description || null,
+          subject: subject || jsonPayload?.subject || "Tổng hợp",
+          topic: topic || jsonPayload?.topic || null,
+          difficulty: difficulty || jsonPayload?.difficulty || "medium",
+          default_exam_questions: Number(defaultExamQuestions),
+          default_exam_duration: Number(defaultExamDuration),
+        });
+
+        if (batchResponse?.ai_meta) {
+          lastAiMeta = batchResponse.ai_meta;
+        }
+        if (batchResponse?.quiz_set) {
+          quizSet = batchResponse.quiz_set;
+        }
+        if (Array.isArray(batchResponse?.preview_questions)) {
+          allPreviewQuestions = [...allPreviewQuestions, ...batchResponse.preview_questions];
+        }
+      }
+    } catch (err) {
+      if (quizSet?.id) {
+        await this.softDeleteQuiz(quizSet.id).catch(() => {});
+      }
+      throw err;
+    }
+
+    onProgress({
+      step: "completed",
+      percent: 100,
+      completedQuestions: allPreviewQuestions.length || total,
+      totalQuestions: total,
+      batchIndex: chunks.length,
+      totalBatches: chunks.length,
+      modelName: "JSON Direct Import",
+      aiMeta: lastAiMeta,
+      message: "Tạo đề thành công!",
+    });
+
+    return {
+      success: true,
+      quiz_set: quizSet,
+      question_count: allPreviewQuestions.length || total,
+      preview_questions: allPreviewQuestions,
+      source: "direct_json",
+      ai_meta: lastAiMeta,
+    };
+  },
+
+  /**
    * Lists public, approved, non-deleted quiz sets for Explore / Community.
    */
   async listPublicQuizzes({

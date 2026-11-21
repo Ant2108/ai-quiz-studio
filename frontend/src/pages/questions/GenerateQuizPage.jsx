@@ -9,6 +9,7 @@ import { DifficultyBadge } from "../../components/ui/StatusBadge.jsx";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   Sparkles,
@@ -19,6 +20,8 @@ import {
   Globe,
   Play,
   FileText,
+  FileJson,
+  Upload,
 } from "lucide-react";
 
 export function GenerateQuizPage() {
@@ -32,9 +35,13 @@ export function GenerateQuizPage() {
     generateProgress,
     error: quizError,
     generateQuiz,
+    generateQuizFromJson,
     submitForPublicApproval,
   } = useQuiz();
 
+  const [inputMode, setInputMode] = useState("document"); // "document" | "json"
+  const [jsonText, setJsonText] = useState("");
+  const [jsonFileName, setJsonFileName] = useState("");
   const [documentId, setDocumentId] = useState(initialDocId);
   const [title, setTitle] = useState("");
   const [subject, setSubject] = useState("");
@@ -91,10 +98,69 @@ export function GenerateQuizPage() {
     applyDocSuggestions(selectedDoc);
   };
 
+  const handleJsonFileUpload = async (file) => {
+    if (!file) return;
+    try {
+      const content = await file.text();
+      setJsonText(content);
+      setJsonFileName(file.name);
+      const parsed = JSON.parse(content);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        if (parsed.title && !title) setTitle(String(parsed.title));
+        if (parsed.subject && !subject) setSubject(String(parsed.subject));
+        if (parsed.description && !description) setDescription(String(parsed.description));
+        if (Array.isArray(parsed.questions)) {
+          setDefaultExamQuestions(Math.min(60, parsed.questions.length));
+        }
+      } else if (Array.isArray(parsed)) {
+        setDefaultExamQuestions(Math.min(60, parsed.length));
+      }
+      setLocalError("");
+    } catch {
+      setLocalError("File JSON không hợp lệ. Vui lòng kiểm tra cú pháp JSON.");
+    }
+  };
+
   const handleGenerate = async (e) => {
     e.preventDefault();
     setLocalError("");
     setGeneratedResult(null);
+
+    if (inputMode === "json") {
+      if (!jsonText.trim()) {
+        setLocalError("Vui lòng dán nội dung JSON hoặc tải lên file .json.");
+        return;
+      }
+      let parsedJson;
+      try {
+        parsedJson = JSON.parse(jsonText);
+      } catch {
+        setLocalError("Nội dung JSON không hợp lệ. Vui lòng kiểm tra dấu ngoặc và dấu phẩy.");
+        return;
+      }
+
+      try {
+        const result = await generateQuizFromJson({
+          jsonPayload: parsedJson,
+          title: title.trim() || parsedJson?.title || "Bộ đề từ JSON",
+          description: description.trim() || parsedJson?.description || null,
+          subject: subject.trim() || parsedJson?.subject || "Tổng hợp",
+          topic: topic.trim() || parsedJson?.topic || null,
+          difficulty,
+          defaultExamQuestions: Number(defaultExamQuestions) || 60,
+          defaultExamDuration: Number(defaultExamDuration) || 60,
+        });
+        setGeneratedResult(result);
+        toast.success(
+          `Tạo đề thành công từ JSON (${result.question_count} câu hỏi — không qua Gemini)!`,
+        );
+      } catch (err) {
+        const msg = err.message || "Không thể tạo bộ đề từ JSON.";
+        setLocalError(msg);
+        toast.error(msg);
+      }
+      return;
+    }
 
     if (!documentId) {
       setLocalError("Vui lòng chọn một tài liệu nguồn để sinh câu hỏi.");
@@ -189,51 +255,114 @@ export function GenerateQuizPage() {
 
       <Card className="border-slate-200/80 shadow-xs">
         <CardHeader className="border-b border-slate-100 pb-4">
-          <CardTitle className="text-base font-bold">
-            Cấu hình sinh đề AI
-          </CardTitle>
-          <CardDescription className="text-xs">
-            Hệ thống tự động chia nhỏ tài liệu lớn và kiểm định JSON đáp án trước khi lưu vào database.
-          </CardDescription>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base font-bold">
+                {inputMode === "json" ? "Tạo đề trực tiếp từ JSON" : "Cấu hình sinh đề AI"}
+              </CardTitle>
+              <CardDescription className="text-xs mt-0.5">
+                {inputMode === "json"
+                  ? "Nhập trực tiếp JSON câu hỏi để tạo bộ đề ngay lập tức mà không cần gọi Gemini AI."
+                  : "Hệ thống tự động chia nhỏ tài liệu lớn và kiểm định JSON đáp án trước khi lưu vào database."}
+              </CardDescription>
+            </div>
+            <div className="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-50">
+              <button
+                type="button"
+                onClick={() => {
+                  setInputMode("document");
+                  setLocalError("");
+                }}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors inline-flex items-center gap-1.5 ${
+                  inputMode === "document"
+                    ? "bg-[#333836] text-[#B0FDE0]"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                <Sparkles className="size-3.5" />
+                <span>Từ tài liệu</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setInputMode("json");
+                  setLocalError("");
+                }}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors inline-flex items-center gap-1.5 ${
+                  inputMode === "json"
+                    ? "bg-[#333836] text-[#B0FDE0]"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                <FileJson className="size-3.5" />
+                <span>Gửi bằng JSON</span>
+              </button>
+            </div>
+          </div>
         </CardHeader>
 
         <CardContent className="p-6">
           <form onSubmit={handleGenerate} className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              {/* Source Document */}
-              <div className="md:col-span-2 space-y-1.5">
-                <Label htmlFor="gen-doc">Tài liệu nguồn *</Label>
-                {loadingDocs ? (
-                  <div className="h-10 px-3 rounded-lg border border-slate-200 text-xs text-slate-500 flex items-center gap-2">
-                    <Loader2 className="size-4 animate-spin text-primary" />
-                    <span>Đang tải danh sách tài liệu...</span>
+              {inputMode === "json" ? (
+                <div className="md:col-span-2 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Label htmlFor="gen-json-input">Dữ liệu JSON câu hỏi (tối đa 500 câu) *</Label>
+                    <label className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5 cursor-pointer">
+                      <Upload className="size-3.5" />
+                      <span>{jsonFileName ? `Đã chọn: ${jsonFileName}` : "Chọn file .json"}</span>
+                      <input
+                        type="file"
+                        accept=".json,application/json"
+                        className="hidden"
+                        onChange={(e) => handleJsonFileUpload(e.target.files?.[0])}
+                      />
+                    </label>
                   </div>
-                ) : documents.length === 0 ? (
-                  <div className="p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex flex-wrap items-center justify-between gap-2">
-                    <span>Bạn chưa có tài liệu nào. Hãy tải lên PDF, DOCX, TXT hoặc ảnh trước.</span>
-                    <Link
-                      to="/documents"
-                      className="h-7 px-3 rounded-md bg-amber-600 text-white font-semibold inline-flex items-center"
+                  <Textarea
+                    id="gen-json-input"
+                    rows={8}
+                    value={jsonText}
+                    onChange={(e) => setJsonText(e.target.value)}
+                    placeholder={`{\n  "title": "Đề thi mẫu",\n  "questions": [\n    {\n      "question_text": "1 + 1 = ?",\n      "question_type": "multiple_choice",\n      "difficulty": "easy",\n      "options": [\n        { "option_label": "A", "option_content": "1" },\n        { "option_label": "B", "option_content": "2" }\n      ],\n      "correct_option_label": "B",\n      "explanation": "1 + 1 = 2"\n    }\n  ]\n}`}
+                    className="font-mono text-xs"
+                  />
+                </div>
+              ) : (
+                <div className="md:col-span-2 space-y-1.5">
+                  <Label htmlFor="gen-doc">Tài liệu nguồn *</Label>
+                  {loadingDocs ? (
+                    <div className="h-10 px-3 rounded-lg border border-slate-200 text-xs text-slate-500 flex items-center gap-2">
+                      <Loader2 className="size-4 animate-spin text-primary" />
+                      <span>Đang tải danh sách tài liệu...</span>
+                    </div>
+                  ) : documents.length === 0 ? (
+                    <div className="p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex flex-wrap items-center justify-between gap-2">
+                      <span>Bạn chưa có tài liệu nào. Hãy tải lên PDF, DOCX, TXT, JSON hoặc ảnh trước.</span>
+                      <Link
+                        to="/documents"
+                        className="h-7 px-3 rounded-md bg-amber-600 text-white font-semibold inline-flex items-center"
+                      >
+                        Tải tài liệu ngay
+                      </Link>
+                    </div>
+                  ) : (
+                    <select
+                      id="gen-doc"
+                      value={documentId}
+                      onChange={(e) => handleSelectDocument(e.target.value)}
+                      className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm bg-white outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
                     >
-                      Tải tài liệu ngay
-                    </Link>
-                  </div>
-                ) : (
-                  <select
-                    id="gen-doc"
-                    value={documentId}
-                    onChange={(e) => handleSelectDocument(e.target.value)}
-                    className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm bg-white outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
-                  >
-                    {documents.map((doc) => (
-                      <option key={doc.id} value={doc.id}>
-                        {doc.file_name} ({doc.file_type?.toUpperCase()} •{" "}
-                        {doc.status === "processed" ? "Đã phân tích AI" : doc.status})
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
+                      {documents.map((doc) => (
+                        <option key={doc.id} value={doc.id}>
+                          {doc.file_name} ({doc.file_type?.toUpperCase()} •{" "}
+                          {doc.status === "processed" ? "Đã phân tích AI" : doc.status})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
 
               <div className="md:col-span-2 space-y-1.5">
                 <Label htmlFor="gen-title">Tiêu đề bộ đề *</Label>
@@ -471,18 +600,30 @@ export function GenerateQuizPage() {
             <div className="flex justify-end pt-4 border-t border-slate-100">
               <Button
                 type="submit"
-                disabled={generating || documents.length === 0}
+                disabled={
+                  generating ||
+                  (inputMode === "document" && documents.length === 0) ||
+                  (inputMode === "json" && !jsonText.trim())
+                }
                 className="h-10 px-6 bg-[#B0FDE0] hover:bg-[#93f5d0] text-[#333836] font-semibold"
               >
                 {generating ? (
                   <>
                     <Loader2 className="size-4 animate-spin" />
-                    <span>Gemini AI đang biên soạn {questionCount} câu...</span>
+                    <span>
+                      {inputMode === "json"
+                        ? "Đang lưu bộ đề từ JSON..."
+                        : `Gemini AI đang biên soạn ${questionCount} câu...`}
+                    </span>
                   </>
                 ) : (
                   <>
-                    <Sparkles className="size-4" />
-                    <span>Generate Quiz</span>
+                    {inputMode === "json" ? (
+                      <FileJson className="size-4" />
+                    ) : (
+                      <Sparkles className="size-4" />
+                    )}
+                    <span>{inputMode === "json" ? "Tạo đề ngay từ JSON" : "Generate Quiz"}</span>
                   </>
                 )}
               </Button>

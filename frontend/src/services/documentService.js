@@ -10,6 +10,7 @@ export const ALLOWED_EXTENSIONS = [
   "pdf",
   "docx",
   "txt",
+  "json",
   "png",
   "jpg",
   "jpeg",
@@ -20,6 +21,7 @@ export const ALLOWED_MIME_TYPES = [
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "text/plain",
+  "application/json",
   "image/png",
   "image/jpeg",
   "image/webp",
@@ -31,6 +33,7 @@ const EXT_TO_MIME = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   txt: "text/plain",
+  json: "application/json",
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -45,7 +48,7 @@ export function validateFileBeforeUpload(file) {
   const ext = (file.name.split(".").pop() || "").toLowerCase().trim();
   if (!ALLOWED_EXTENSIONS.includes(ext)) {
     throw new Error(
-      `Định dạng .${ext || "unknown"} không được hỗ trợ. Chỉ chấp nhận PDF, DOCX, TXT, PNG, JPG, WEBP.`,
+      `Định dạng .${ext || "unknown"} không được hỗ trợ. Chỉ chấp nhận PDF, DOCX, TXT, JSON, PNG, JPG, WEBP.`,
     );
   }
 
@@ -83,11 +86,11 @@ function sanitizeStorageFileName(fileName) {
  */
 async function tryExtractClientText(file, ext) {
   try {
-    if (ext === "txt") {
+    if (ext === "txt" || ext === "json") {
       const text = await file.text();
       return {
         extractedText: text.trim(),
-        pageCount: Math.max(1, Math.ceil(text.length / 2500)),
+        pageCount: ext === "json" ? 1 : Math.max(1, Math.ceil(text.length / 2500)),
       };
     }
 
@@ -195,7 +198,10 @@ export const documentService = {
     onProgress({
       step: "processing_ai",
       percent: 80,
-      message: "Đang xử lý bằng Gemini 3.8 Flash...",
+      message:
+        ext === "json"
+          ? "Đang kiểm định & lưu bộ câu hỏi JSON (không qua Gemini)..."
+          : "Đang xử lý bằng Gemini 3.8 Flash...",
     });
 
     const processedResult = await this.processDocument(docRecord.id, clientExtraction);

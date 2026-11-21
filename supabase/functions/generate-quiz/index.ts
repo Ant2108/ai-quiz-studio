@@ -19,7 +19,11 @@
 import { handleCorsPreflight } from "../_shared/cors.ts";
 import { AppError, errorResponse, jsonResponse } from "../_shared/response.ts";
 import { enforceAiRateLimit, requireAuth } from "../_shared/auth.ts";
-import { requireUuid, validateDocumentFile } from "../_shared/validation.ts";
+import {
+  requireUuid,
+  validateDocumentFile,
+  validateGeneratedQuizPayload,
+} from "../_shared/validation.ts";
 import { analyzeDocumentWithGemini } from "../_shared/gemini.ts";
 import { generateQuizDatabaseFirst } from "../_shared/document-pipeline.ts";
 
@@ -43,7 +47,14 @@ Deno.serve(async (req: Request) => {
     }
 
     const payload = body as Record<string, unknown>;
-    const documentId = requireUuid(payload.document_id, "document_id");
+    const hasDirectJson =
+      payload.json_payload !== undefined && payload.json_payload !== null;
+    const documentId =
+      typeof payload.document_id === "string" && payload.document_id.trim()
+        ? requireUuid(payload.document_id, "document_id")
+        : hasDirectJson
+        ? null
+        : requireUuid(payload.document_id, "document_id");
     const existingQuizSetId =
       typeof payload.quiz_set_id === "string" && payload.quiz_set_id.trim()
         ? requireUuid(payload.quiz_set_id, "quiz_set_id")
@@ -85,6 +96,109 @@ Deno.serve(async (req: Request) => {
       );
     }
     const difficulty = rawDifficulty as "easy" | "medium" | "hard";
+
+    // Direct JSON Quiz Creation Fast-Path (0 Gemini calls, optional document_id)
+    if (hasDirectJson) {
+      if (existingQuizSetId) {
+        const { data: existingQuiz, error: eqError } = await adminClient
+          .from("quiz_sets")
+          .select("id, user_id")
+          .eq("id", existingQuizSetId)
+          .is("deleted_at", null)
+          .maybeSingle();
+
+        if (eqError || !existingQuiz) {
+          throw new AppError("Không tìm thấy bộ đề cần bổ sung câu hỏi.", 404, "QUIZ_NOT_FOUND");
+        }
+        if (existingQuiz.user_id !== user.id && profile.role !== "admin") {
+          throw new AppError("Bạn không có quyền chỉnh sửa bộ đề này.", 403, "FORBIDDEN_NOT_OWNER");
+        }
+      }
+
+      const validated = validateGeneratedQuizPayload(
+        payload.json_payload,
+        rawTitle || "Bộ đề từ JSON",
+        difficulty,
+      );
+
+      if (validated.questions.length > 500) {
+        throw new AppError(
+          "Số lượng câu hỏi trong JSON không được vượt quá 500 câu cho mỗi bộ đề.",
+          400,
+          "INVALID_QUESTION_COUNT",
+        );
+      }
+
+      const finalTitle = rawTitle || validated.title || "Bộ đề từ JSON";
+      const defaultExamQuestions =
+        typeof payload.default_exam_questions === "number" &&
+          payload.default_exam_questions > 0
+          ? Math.min(500, Math.round(payload.default_exam_questions))
+          : Math.min(60, validated.questions.length);
+      const defaultExamDuration =
+        typeof payload.default_exam_duration === "number" &&
+          payload.default_exam_duration > 0
+          ? Math.round(payload.default_exam_duration)
+          : 60;
+
+      const { data: txResult, error: txError } = existingQuizSetId
+        ? await adminClient.rpc("rpc_append_questions_to_quiz", {
+            p_quiz_set_id: existingQuizSetId,
+            p_user_id: user.id,
+            p_document_id: documentId,
+            p_difficulty: difficulty,
+            p_questions: validated.questions,
+          })
+        : await adminClient.rpc("rpc_create_quiz_with_questions", {
+            p_user_id: user.id,
+            p_document_id: documentId,
+            p_title: finalTitle,
+            p_description:
+              description ||
+              `Bộ đề trắc nghiệm tạo trực tiếp từ JSON (${validated.questions.length} câu hỏi)`,
+            p_subject: subject,
+            p_topic: topic,
+            p_difficulty: difficulty,
+            p_default_exam_questions: defaultExamQuestions,
+            p_default_exam_duration: defaultExamDuration,
+            p_questions: validated.questions,
+          });
+
+      if (txError || !txResult) {
+        throw new AppError(
+          `Không thể lưu bộ đề từ JSON: ${txError?.message || "Transaction failed"}`,
+          500,
+          "QUIZ_CREATION_TRANSACTION_FAILED",
+        );
+      }
+
+      const { data: quizSet } = await adminClient
+        .from("quiz_sets")
+        .select("*")
+        .eq("id", txResult.quiz_set_id)
+        .single();
+
+      return jsonResponse(
+        {
+          success: true,
+          quiz_set: quizSet,
+          question_count: txResult.question_count,
+          preview_questions: txResult.questions,
+          source: "direct_json",
+          ai_meta: {
+            model_id: "direct-json",
+            model_name: "JSON Direct Import (0 Gemini calls)",
+            fallback_triggered: false,
+            status_messages: [
+              `Đã tạo đề trực tiếp từ JSON với ${txResult.question_count} câu hỏi (không qua Gemini).`,
+            ],
+            attempts: [],
+          },
+        },
+        201,
+        req,
+      );
+    }
 
     const questionCount = Number(payload.question_count ?? 10);
     if (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > 500) {
