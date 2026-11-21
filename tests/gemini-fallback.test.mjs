@@ -1127,3 +1127,52 @@ test("Language Preservation: Gemini prompts instruct keeping source language for
   assert.ok(sysText.includes("TUYỆT ĐỐI KHÔNG tự động dịch"));
   assert.ok(sysText.includes("explanation"));
 });
+
+test("Full Extraction Continuation: Automatically extracts remaining questions when Pass 1 stops at 20 out of 50", async () => {
+  const longExamText = Array.from(
+    { length: 50 },
+    (_, i) => `[Trang ${i + 1}] MULTIPLE CHOICE\nQuestion ${i + 1} about Flutter?\nA. Opt A\nB. Opt B\nC. Opt C\nD. Opt D`,
+  ).join("\n\n");
+
+  let callCount = 0;
+  const res = await analyzeDocumentWithGemini({
+    fileBytes: new TextEncoder().encode(longExamText),
+    fileName: "exam_50.txt",
+    mimeType: "text/plain",
+    ext: "txt",
+    deps: {
+      apiKeyOverride: "fake-key",
+      sleepImpl: async () => {},
+      fetchImpl: async () => {
+        callCount++;
+        if (callCount === 1) {
+          // Simulate Pass 1 stopping early at 20 questions while reporting 50 recommended
+          const first20 = Array.from({ length: 20 }, (_, i) => ({
+            ...makeSampleQuizJson(`Question ${i + 1} about Flutter?`).questions[0],
+          }));
+          return makeGeminiSuccessPayload({
+            extracted_text: "PROVIDED_IN_TEXT",
+            estimated_pages: 50,
+            title_suggestion: "Flutter 50Q Exam",
+            subject_suggestion: "Flutter",
+            topics: ["Widgets"],
+            summary: "50-question Flutter exam.",
+            key_concepts: ["Widget"],
+            recommended_question_count: 50,
+            questions: first20,
+          });
+        }
+        // Continuation pass returns remaining 30 questions (21..50)
+        const next30 = Array.from({ length: 30 }, (_, i) => ({
+          ...makeSampleQuizJson(`Question ${i + 21} about Flutter?`).questions[0],
+        }));
+        return makeGeminiSuccessPayload({ questions: next30 });
+      },
+    },
+  });
+
+  assert.equal(callCount, 2);
+  assert.equal(res.extractedData.questions.length, 50);
+  assert.equal(res.extractedData.questions[0].question_text, "Question 1 about Flutter?");
+  assert.equal(res.extractedData.questions[49].question_text, "Question 50 about Flutter?");
+});

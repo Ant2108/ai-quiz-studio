@@ -112,15 +112,18 @@ export function DocumentsPage() {
       const res = await reprocessDocument(doc.id);
       if (res?.recovered_without_gemini) {
         toast.success(
-          `Đã khôi phục Ngân hàng câu hỏi cho "${doc.file_name}" từ dữ liệu JSONB (0 Gemini calls)`,
+          `Đã khôi phục Ngân hàng câu hỏi cho "${doc.file_name}" (${res.synced_questions ?? 0} câu JSON, 0 Gemini calls)`,
         );
       } else if (res?.ai_meta?.fallback_triggered) {
         toast.success(
-          `Đã phân tích lại "${doc.file_name}" bằng ${res.ai_meta.model_name} (dự phòng)`,
+          `Đã phân tích lại "${doc.file_name}" (${res.synced_questions ?? 0} câu JSON) bằng ${res.ai_meta.model_name} (dự phòng)`,
         );
       } else {
-        toast.success(`Đã phân tích lại tài liệu "${doc.file_name}"`);
+        toast.success(
+          `Đã phân tích lại tài liệu "${doc.file_name}" (${res.synced_questions ?? 0} câu JSON)`,
+        );
       }
+      await fetchDocuments();
     } catch (err) {
       toast.error(err.message || "Không thể phân tích lại tài liệu.");
     } finally {
@@ -400,6 +403,10 @@ export function DocumentsPage() {
                             {doc.file_type?.toUpperCase()} •{" "}
                             {formatFileSize(doc.file_size)}
                             {doc.page_count ? ` • ${doc.page_count} trang` : ""}
+                            {Array.isArray(doc.extracted_data?.questions) &&
+                            doc.extracted_data.questions.length > 0
+                              ? ` • ${doc.extracted_data.questions.length} câu JSON`
+                              : ""}
                             {" • "}
                             {new Date(doc.created_at).toLocaleDateString("vi-VN")}
                           </p>

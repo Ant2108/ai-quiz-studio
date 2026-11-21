@@ -227,7 +227,7 @@ export async function processOrRecoverDocument(params: {
       documentId: doc.id,
       userId: actorUserId,
       questions: validated.questions,
-      replace: forceReanalyze,
+      replace: true,
     });
 
     const updatedDoc = await repo.markDocumentProcessed(doc.id);
@@ -275,13 +275,14 @@ export async function processOrRecoverDocument(params: {
   });
 
   // Checkpoint B: Normalize validated questions into questions / question_options / question_answers
+  // Always replace stale bank rows on a fresh extraction so newly extracted questions (e.g. 50 vs old 20) take effect
   let syncedQuestions = 0;
   if (analysis.extractedData.questions.length > 0) {
     const syncRes = await repo.syncQuestionBank({
       documentId: doc.id,
       userId: actorUserId,
       questions: analysis.extractedData.questions,
-      replace: forceReanalyze,
+      replace: true,
     });
     syncedQuestions = syncRes.synced_count;
   }

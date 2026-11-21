@@ -156,7 +156,22 @@ export function GenerateQuizPage() {
   const [generatedResult, setGeneratedResult] = useState(null);
   const [publishing, setPublishing] = useState(false);
 
+  const getDocBankCount = (doc) =>
+    Array.isArray(doc?.extracted_data?.questions)
+      ? doc.extracted_data.questions.length
+      : 0;
+
+  const selectedDocument = documents.find((d) => d.id === documentId) || null;
+  const selectedDocBankCount = getDocBankCount(selectedDocument);
+
   const applyDocSuggestions = (doc) => {
+    if (!doc) return;
+    const bankCount = getDocBankCount(doc);
+    if (bankCount > 0) {
+      const targetCount = Math.min(500, bankCount);
+      setQuestionCount(targetCount);
+      setDefaultExamQuestions(Math.min(60, targetCount));
+    }
     if (!doc?.ai_summary) return;
     setTitle((prev) =>
       prev ||
@@ -565,13 +580,54 @@ export function GenerateQuizPage() {
                       onChange={(e) => handleSelectDocument(e.target.value)}
                       className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm bg-white outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
                     >
-                      {documents.map((doc) => (
-                        <option key={doc.id} value={doc.id}>
-                          {doc.file_name} ({doc.file_type?.toUpperCase()} •{" "}
-                          {doc.status === "processed" ? "Đã phân tích AI" : doc.status})
-                        </option>
-                      ))}
+                      {documents.map((doc) => {
+                        const bankCount = getDocBankCount(doc);
+                        return (
+                          <option key={doc.id} value={doc.id}>
+                            {doc.file_name} ({doc.file_type?.toUpperCase()} •{" "}
+                            {bankCount > 0
+                              ? `${bankCount} câu JSON`
+                              : doc.status === "processed"
+                              ? "Chưa có câu hỏi JSON"
+                              : doc.status}
+                            )
+                          </option>
+                        );
+                      })}
                     </select>
+                  )}
+                  {selectedDocument && (
+                    <div
+                      className={`mt-2 px-3 py-2 rounded-lg text-xs border flex flex-wrap items-center justify-between gap-2 ${
+                        selectedDocBankCount > 0
+                          ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                          : "bg-amber-50 border-amber-200 text-amber-900"
+                      }`}
+                    >
+                      <span>
+                        {selectedDocBankCount > 0 ? (
+                          <>
+                            Ngân hàng JSON của tài liệu hiện có{" "}
+                            <strong>{selectedDocBankCount} câu hỏi</strong> (tạo đề trực tiếp không gọi Gemini).
+                            {Number(questionCount) > selectedDocBankCount && (
+                              <>
+                                {" "}
+                                Đang yêu cầu {questionCount} câu → bộ đề sẽ lấy tối đa{" "}
+                                <strong>{selectedDocBankCount} câu</strong> hiện có.
+                              </>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            Tài liệu này chưa có câu hỏi JSON trong Ngân hàng câu hỏi. Hãy vào mục{" "}
+                            <Link to="/documents" className="underline font-semibold">
+                              Tài liệu
+                            </Link>{" "}
+                            nhấn <strong>Thử lại</strong> để AI chuyển sang JSON trước.
+                          </>
+                        )}
+                      </span>
+                    </div>
                   )}
                 </div>
               )}
