@@ -1,5 +1,6 @@
 import { Link, Outlet } from "react-router-dom";
-import { BrainCircuit, CheckCircle2, Sparkles, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Sparkles, ShieldCheck } from "lucide-react";
+import { BrandLogo } from "../components/common/BrandLogo.jsx";
 
 const CURRENT_YEAR = new Date().getFullYear();
 
@@ -10,9 +11,7 @@ export function AuthLayout() {
       <div className="hidden lg:flex flex-col justify-between p-12 bg-slate-950 text-white border-r border-slate-800">
         <div>
           <Link to="/" className="inline-flex items-center gap-3 text-white">
-            <div className="size-10 rounded-xl bg-primary flex items-center justify-center shadow-sm">
-              <BrainCircuit className="size-5 text-white" />
-            </div>
+            <BrandLogo className="size-10 shrink-0 rounded-xl shadow-sm" />
             <div>
               <span className="text-lg font-bold tracking-tight block">
                 AI Quiz Studio
@@ -64,9 +63,7 @@ export function AuthLayout() {
         <div className="w-full max-w-md space-y-6">
           <div className="lg:hidden flex items-center justify-center gap-2.5">
             <Link to="/" className="inline-flex items-center gap-2.5">
-              <div className="size-9 rounded-lg bg-[#333836] text-[#B0FDE0] flex items-center justify-center">
-                <BrainCircuit className="size-5" />
-              </div>
+              <BrandLogo className="size-9 shrink-0 rounded-lg" />
               <span className="text-lg font-bold text-slate-900">
                 AI Quiz Studio
               </span>

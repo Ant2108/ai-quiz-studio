@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth.js";
+import { BrandLogo } from "../components/common/BrandLogo.jsx";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
@@ -17,7 +18,6 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
-  BrainCircuit,
   LayoutDashboard,
   Compass,
   Library,
@@ -53,9 +53,7 @@ function SidebarContent({ navItems, isAuthenticated, isAdmin, user, profile, onN
           onClick={onNavigate}
           className="flex items-center gap-2.5 group"
         >
-          <div className="size-9 rounded-lg bg-[#333836] text-[#B0FDE0] flex items-center justify-center shadow-xs transition-transform duration-200 group-hover:scale-[1.03]">
-            <BrainCircuit className="size-5" />
-          </div>
+          <BrandLogo className="size-9 shrink-0 shadow-xs rounded-lg transition-transform duration-200 group-hover:scale-[1.04]" />
           <div className="leading-tight">
             <span className="text-sm font-bold tracking-tight text-slate-900 block">
               AI Quiz Studio
@@ -243,9 +241,7 @@ export function AppLayout() {
               to={isAuthenticated ? "/dashboard" : "/"}
               className="lg:hidden flex items-center gap-2"
             >
-              <div className="size-8 rounded-lg bg-[#333836] text-[#B0FDE0] flex items-center justify-center">
-                <BrainCircuit className="size-4.5" />
-              </div>
+              <BrandLogo className="size-8 shrink-0 rounded-lg" />
               <span className="font-bold text-sm text-slate-900">
                 AI Quiz Studio
               </span>

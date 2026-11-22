@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { useAuth } from "../hooks/useAuth.js";
+import { BrandLogo } from "../components/common/BrandLogo.jsx";
 import { quizService } from "../services/quizService.js";
 import { DifficultyBadge } from "../components/ui/StatusBadge.jsx";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  BrainCircuit,
   FileUp,
   Sparkles,
   CheckCircle2,
@@ -131,10 +131,8 @@ export function LandingPage() {
       {/* Top Sticky Glassmorphic Header */}
       <header className="sticky top-0 z-40 h-16 border-b border-slate-200/80 bg-white/85 backdrop-blur-md">
         <div className="max-w-7xl mx-auto h-full px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
-          <Link to="/" className="flex items-center gap-2.5">
-            <div className="size-9 rounded-lg bg-[#333836] text-[#B0FDE0] flex items-center justify-center shadow-xs">
-              <BrainCircuit className="size-5" />
-            </div>
+          <Link to="/" className="flex items-center gap-2.5 group">
+            <BrandLogo className="size-9 shrink-0 rounded-lg shadow-xs transition-transform duration-200 group-hover:scale-[1.04]" />
             <span className="text-base font-bold tracking-tight text-slate-900">
               AI Quiz Studio
             </span>
@@ -622,7 +620,7 @@ export function LandingPage() {
       <footer className="mt-auto border-t border-slate-200 bg-white py-8 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
           <div className="flex items-center gap-2 font-semibold text-slate-800">
-            <BrainCircuit className="size-4 text-primary" />
+            <BrandLogo className="size-6 shrink-0 rounded-md" />
             <span>AI Quiz Studio</span>
           </div>
           <div className="flex items-center gap-5">
